@@ -1,0 +1,160 @@
+# Architecture (Phase 1)
+
+Phase 1 is three small pieces around one file format: a hook entry point, a
+log writer, and a reader. Everything else in the diagram is a later phase and
+is shown only to prove the seams exist.
+
+```
+                         Phase 1                          later phases (dashed)
+  ┌───────────────┐   hook JSON    ┌──────────────┐
+  │  Claude Code  │ ───stdin────▶  │  nd7 hook    │
+  │  (hooks)      │                │  (intent)    │
+  └───────────────┘                └──────┬───────┘
+                                          │ Event{source: intent:claude-code}
+  ┌ ─ ─ ─ ─ ─ ─ ─ ┐                       │
+  │  Codex hooks  │ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─▶│ intent:codex
+  └ ─ ─ ─ ─ ─ ─ ─ ┘                       │
+  ┌ ─ ─ ─ ─ ─ ─ ─ ┐  ┌ ─ ─ ─ ─ ─ ─ ─ ┐    │
+  │ macOS ES      │─▶│ nd7 collector │ ─ ▶│ effect:es
+  │ Linux fanotify│  │ (daemon)      │    │ effect:fanotify
+  └ ─ ─ ─ ─ ─ ─ ─ ┘  └ ─ ─ ─ ─ ─ ─ ─ ┘    │
+  ┌ ─ ─ ─ ─ ─ ─ ─ ┐                       │
+  │ remote nd7    │ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─▶│ effect:remote  (same session_id)
+  └ ─ ─ ─ ─ ─ ─ ─ ┘                       ▼
+                                   ┌──────────────┐
+                                   │  log writer  │  seq, ts, prev-hash, hash
+                                   │  (append)    │
+                                   └──────┬───────┘
+                                          ▼
+                     $XDG_STATE_HOME/nd7/sessions/<session_id>/events.ndjson
+                                          │
+                                          ▼
+                                   ┌──────────────┐        ┌ ─ ─ ─ ─ ─ ─ ┐
+                                   │  nd7 show    │        │ upload /    │
+                                   │  nd7 verify  │        │ org storage │
+                                   └──────────────┘        └ ─ ─ ─ ─ ─ ─ ┘
+```
+
+## Hook entry point: `nd7 hook`
+
+Claude Code runs the configured command for each hook event and pipes one JSON
+object to its stdin (verified against https://code.claude.com/docs/en/hooks).
+`nd7 hook` does the following, in order, and nothing else:
+
+1. Take the invocation timestamp (wall clock, nanosecond resolution; plus a
+   monotonic reading for ordering within a process, see SCHEMA.md).
+2. Read stdin to EOF and parse the JSON with serde.
+3. Dispatch on `hook_event_name` to build one event of the matching kind.
+   Unknown event names are still recorded, as a generic `hook` event, so an
+   upgrade of Claude Code never causes silent data loss.
+4. Append the event to the session log (see writer).
+5. Exit 0 with no stdout.
+
+Rules:
+
+- Always exit 0. Never print JSON to stdout. Claude Code interprets stdout
+  JSON and exit code 2 as control decisions; `nd7` must never make one.
+- If anything fails (bad JSON, unwritable directory), write one line to
+  stderr and exit 0. Losing one event is better than blocking the agent.
+- Budget: a few milliseconds. Rust startup plus one small file append is well
+  under that. No network, no threads, no config parsing beyond environment
+  variables.
+
+Why one binary with subcommands instead of separate hook binaries: one install
+step, one settings snippet, and the hook path stays the same when we add
+events.
+
+Why not `async: true` in the hook config: async hooks are not awaited, so an
+event could be appended after a later event's hook already ran, which breaks
+sequence ordering. Synchronous with a tight timeout is simpler and, at our
+cost, equally invisible. Revisit if measurements say otherwise.
+
+## Log writer
+
+One append-only file per session. The writer:
+
+1. Resolves the session directory from `session_id`.
+2. Takes an exclusive advisory lock on the directory's `lock` file (`flock`).
+   Claude Code can run several tool calls, and thus several hooks, at the same
+   time; without the lock, sequence numbers and the hash chain race.
+3. Reads the chain head (`head`: last `seq` and last `hash`) from a small
+   sidecar file, so appending does not require scanning the log.
+4. Fills in `seq`, `prev`, computes `hash`, serializes the frame, appends it
+   with a single `write` on an `O_APPEND` file descriptor.
+5. Rewrites `head`, releases the lock.
+
+Crash safety: if the process dies between 4 and 5, `head` is stale by one
+event. The writer detects this on the next append by checking that the last
+frame in the file matches `head`, and repairs `head` from the file's tail.
+The log itself is never rewritten.
+
+Session start: the first event for an unknown `session_id` creates the
+directory. There is no separate "open session" step because hooks can arrive
+in any order after a crash or a resumed session, and `SessionStart` may fire
+with `source: resume` or `compact` for an existing log.
+
+## Session layout on disk
+
+```
+$XDG_STATE_HOME/nd7/                 (default ~/.local/state/nd7)
+└── sessions/
+    └── <session_id>/
+        ├── events.ndjson            append-only event log, one frame per line
+        ├── head                     "<seq> <hash>\n", chain head for fast append
+        └── lock                     empty, flock target
+```
+
+`session_id` is used verbatim as the directory name. Claude Code session ids
+are UUIDs (verify: format is not documented, only shown as `abc123` in
+examples). The writer rejects ids containing path separators or `..`.
+
+Why per-session files, not one big log: sessions are the unit of reading,
+shipping and deleting. Per-session files make `show`, `verify`, retention and
+upload trivially scoped and let concurrent sessions never contend.
+
+Why XDG state, not data or cache: this is machine-local state that should
+survive reboots but is not user-authored data and is not safely discardable.
+nono uses the same location class for its audit logs.
+
+## Reader: `nd7 show`, `nd7 sessions`, `nd7 verify`
+
+- `sessions`: list session directories with first/last timestamp, event count
+  and cwd of the first event.
+- `show <id>`: stream the file, decode frames, print a timeline. One line per
+  event by default (time, kind, summary), `-v` for full payloads, `--json` for
+  raw frames. Pairs `tool_call`/`tool_result` via `tool_use_id` to show
+  durations and statuses inline.
+- `verify <id>`: recompute the chain from the first frame and report the first
+  divergence, if any. In Phase 1 this proves only that the file has not been
+  edited since it was written by *this* machine; anyone with write access can
+  rewrite the whole chain. Signing (Phase 2+) closes that gap. The reader says
+  so in its output.
+
+The reader is the only component that reads the log. Nothing in the hook path
+depends on it.
+
+## Where future sources attach
+
+Every producer, present or future, builds the same `Event` struct and hands it
+to the same writer. The writer does not know or care about `source`. This is
+the whole seam:
+
+- **Codex / other agents**: a new `nd7 hook --agent codex` (or a separate
+  subcommand) parses a different payload into the same event kinds with
+  `source: intent:codex`.
+- **Kernel effects**: a long-running `nd7 collector` subscribes to Endpoint
+  Security (macOS) or fanotify/seccomp-notify (Linux), attributes events to a
+  process tree, and appends `effect:*` events to the session whose intent
+  events it matches. The match uses the join keys stored since Phase 1:
+  timestamp window, cwd, argv, and the hook process's parent pid.
+- **Remote hosts**: a remote `nd7` appends to a local log with the same
+  `session_id` and the local reader merges the two files by timestamp. The
+  frame format carries `host` in the envelope from Phase 1 for this reason.
+
+Things Phase 1 must *not* do because they would make these harder:
+
+- Put agent-specific field names in the envelope. Everything Claude Code
+  specific lives inside the event body.
+- Assume one process appends to a session. Hence the lock and `head` file.
+- Assume the log is read on the machine that wrote it. Hence self-describing
+  frames and absolute paths recorded as given, not normalized.
