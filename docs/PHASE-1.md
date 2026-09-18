@@ -3,7 +3,7 @@
 Each milestone is one sitting. Each ends with something runnable. Order
 matters only where noted.
 
-- [ ] **M0. Settle the schema and frame format.** Decide the open questions in
+- [~] **M0. Settle the schema and frame format.** (ADR-0002 settled `PostToolUseFailure`, `Stop`, NDJSON, exec form; content policy and genesis binding still open) Decide the open questions in
   [SCHEMA.md](SCHEMA.md) §5–6, record them in DECISIONS.md, mark the schema
   `v0`. No code.
 
@@ -25,7 +25,7 @@ matters only where noted.
   `prompt`, `tool_call`, `tool_result`, `session_end`, `turn_end`, plus the
   `hook` catch-all. Hoist `argv` and `paths`. Unit tests from the fixtures.
 
-- [ ] **M4. Hash chain.** `prev`/`hash` with BLAKE3, `head` sidecar, `flock`
+- [~] **M4. Hash chain.** (`flock` on append landed 2026-09-18 with thread and 40-process tests; `head`, `prev`/`hash`, repair and `verify` pending) `prev`/`hash` with BLAKE3, `head` sidecar, `flock`
   on append, stale-head repair. `nd7 verify` recomputes the chain and prints
   the trust caveat. Test: tamper with a byte, verify fails at the right seq.
 
@@ -33,7 +33,7 @@ matters only where noted.
   `tool_call`/`tool_result` by `tool_use_id` with durations, `-v` for full
   payloads, `--json` for raw frames, colour off when not a TTY.
 
-- [ ] **M6. Never slow the agent.** Measure `nd7 hook` wall time on a 1k-event
+- [~] **M6. Never slow the agent.** (first numbers in ADR-0003: ~4 ms process spawn, ~6 ms for the `sh -c` wrapper removed by exec form, ~1 ms for the append, plus ~8 ms per 5k lines for the seq scan that `head` removes) Measure `nd7 hook` wall time on a 1k-event
   session (target: p99 under 5 ms on this laptop). Confirm behaviour when the
   state dir is unwritable, stdin is empty, JSON is malformed: stderr line, exit
   0. Confirm `SessionEnd` fits the 1.5 s budget.
@@ -47,4 +47,7 @@ matters only where noted.
   tests on macOS and Linux, licence file chosen.
 
 Deferred to Phase 2 (not on this list): signing, compression, interning,
-binary container, `PostToolUseFailure` unless chosen in M0, Codex adapter.
+binary container, Codex adapter, a long-running writer daemon (ADR-0003).
+`PostToolUseFailure` was chosen in ADR-0002 and is in.
+
+Legend: `[x]` done, `[~]` partly done with the remainder noted, `[ ]` not started.

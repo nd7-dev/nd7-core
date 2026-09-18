@@ -112,3 +112,51 @@ plan. Register the hook in exec form (`"command": "nd7", "args": ["hook"]`).
 - Must revisit: when the packed container lands, hashes must be computed over
   the NDJSON bytes so packing does not change them.
 
+## ADR-0003: Library plus thin binaries, no async runtime, no daemon
+
+- Date: 2026-09-18
+- Status: accepted
+
+### Context
+The first binary used a tokio runtime and a spawned thread for a blocking
+stdin read and one file append. While installing the hook we asked whether a
+long-running daemon holding the log's file descriptor would cut latency, and
+measured where a hook invocation actually spends its time on this laptop
+(debug build, 200 iterations, ~0.4 ms loop overhead included):
+
+| step | cost |
+|---|---|
+| spawn any process | ~3.6 to 3.9 ms |
+| `sh -c` wrapper (shell-form registration) | ~6 ms on top |
+| nd7 startup, stdin, parse, runtime init | ~3 ms on top |
+| open, append, close the log | ~1 ms |
+| counting lines for `seq` on a 5k-line log | ~8 ms on top |
+
+A `nc` client that only spawns and connects to a socket cost ~8 ms, the same
+as the whole nd7 binary. A release build was not measurably faster.
+
+### Decision
+Structure the crate as a library, `nd7_core`, with thin binary targets
+(`nd7audit` first). Use plain blocking std I/O in the hook path; no tokio.
+Do not build a daemon for latency. Register hooks in exec form. Remove the
+seq scan with the `head` sidecar (M4) rather than with a resident process.
+
+### Alternatives considered
+- **Daemon with a thin client.** Saves at most the ~1 ms append; the client
+  still pays spawn and connect. Adds lifecycle, crash durability (buffered
+  events lost, or an ack round trip), and version skew: the daemon keeps old
+  code in memory, which breaks the rebuild-and-go workflow.
+- **Keep tokio.** Nothing in the hook is concurrent; the runtime is startup
+  cost and binary size for no work.
+- **`async: true` hooks.** Removes the wait from the agent entirely but `-p`
+  sessions kill async hooks at teardown and completion order is not
+  guaranteed. Kept as an option for noisy, low-value events only.
+
+### Consequences
+- Easier: the binary is ten lines; every `cargo build` is live on the next
+  hook; the writer is reusable by any producer.
+- Harder: nothing. The seam for a future single-writer daemon is the
+  `SessionLog` type: a socket-backed implementation with a build-id handshake
+  and direct-write fallback fits behind it when the Phase 2 collector arrives.
+- Must revisit: after `head` lands, remeasure against the 5 ms p99 target.
+

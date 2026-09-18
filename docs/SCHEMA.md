@@ -21,7 +21,7 @@ fields. Agent-specific data never appears here; it goes in `body`.
 |--------------|-----------------|-----|--------|---------|
 | `v`          | u16             | yes | nd7    | Schema version of this frame. `0` while drafting. |
 | `session_id` | string          | yes | hook   | Top-level grouping key. Claude Code's `session_id` verbatim. |
-| `seq`        | u64             | yes | nd7    | Position in this session's log on this host, starting at 0. Dense. |
+| `seq`        | u64             | yes | nd7    | Position in this session's log on this host, starting at 0. Dense. Assigned under the session's advisory lock, so concurrent hooks never collide (verified). |
 | `ts`         | i64 (ns)        | yes | nd7    | Wall-clock time at recorder invocation, Unix epoch nanoseconds, UTC. |
 | `mono`       | u64 (ns)        | opt | nd7    | Monotonic clock at invocation. Ordering aid within one host boot; not comparable across hosts. |
 | `host`       | string          | yes | nd7    | Hostname (or configured host id) of the machine that produced the event. Needed for remote continuity. |

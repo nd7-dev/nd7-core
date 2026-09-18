@@ -8,11 +8,23 @@ format is the contract.
 
 ## Phase 1: what this repo does today
 
-- A small Rust binary, `nd7`, invoked by Claude Code hooks.
-- Each hook invocation reads the hook JSON from stdin and appends one event to
-  the session's log under an XDG state directory.
-- Events are BLAKE3 hash-chained, so truncation or edits are detectable.
-- `nd7 show <session-id>` prints a session as a human-readable timeline.
+- A library crate, `nd7_core`, and one binary target, `nd7audit`, invoked by
+  Claude Code hooks as `nd7 hook`.
+- Every hook invocation reads the hook JSON from stdin, parses it into a typed
+  model of all 33 documented Claude Code hook events, transforms it into one
+  nd7 event, and appends it as one NDJSON line to the session's log under an
+  XDG state directory.
+- Appends are serialized with an advisory lock per session, so Claude Code's
+  parallel tool calls cannot produce duplicate sequence numbers. Verified by a
+  test that fires 40 hook processes at one session at once.
+- Six event kinds have typed bodies: `session_start`, `prompt`, `tool_call`,
+  `tool_result` (success and failure), `session_end`, `turn_end`. Every other
+  hook event is kept whole under `kind: hook`, so a Claude Code upgrade never
+  loses data.
+
+Not there yet, in order of arrival: the BLAKE3 hash chain and `head` sidecar,
+the `verify` command, and the reader (`sessions`, `show`). See
+[docs/PHASE-1.md](docs/PHASE-1.md).
 
 Phase 1 records **intent only**: what Claude Code said it was about to do and
 what it reported back. It is not proof of what ran on the machine. See
@@ -20,46 +32,71 @@ what it reported back. It is not proof of what ran on the machine. See
 hosts, enforcement and undo fit in.
 
 Non-goals right now: Endpoint Security, Seatbelt, enforcement, undo, remote
-hosts, server, UI.
+hosts, server, UI, a daemon.
 
 ## Install
 
-Build and put the binary on your `PATH`:
+Build and put the binary on your `PATH` under the name `nd7`:
 
 ```sh
-cargo install --path .
+cargo build --release
+ln -s "$PWD/target/release/nd7audit" ~/.cargo/bin/nd7
 ```
 
-Add the hooks to your Claude Code settings (`~/.claude/settings.json` for all
-projects, or `.claude/settings.json` in a project). Each entry runs `nd7 hook`,
-which reads the event from stdin and returns immediately.
+For development, point the symlink at `target/debug/nd7audit` instead. Hooks
+are spawned fresh per event, so every `cargo build` is picked up by the next
+hook without restarting Claude Code.
+
+Register the hook in your Claude Code settings (`~/.claude/settings.json` for
+all projects, or `.claude/settings.json` in a project). Use **exec form**
+(`command` plus `args`): it skips the `sh -c` wrapper, which we measured at
+about 6 ms per hook, and it makes the recorded parent pid the `claude` process
+itself rather than an intermediate shell. One entry per event you want:
 
 ```json
 {
   "hooks": {
-    "SessionStart":     [{ "hooks": [{ "type": "command", "command": "nd7 hook", "timeout": 5 }] }],
-    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "nd7 hook", "timeout": 5 }] }],
-    "PreToolUse":       [{ "hooks": [{ "type": "command", "command": "nd7 hook", "timeout": 5 }] }],
-    "PostToolUse":      [{ "hooks": [{ "type": "command", "command": "nd7 hook", "timeout": 5 }] }],
-    "Stop":             [{ "hooks": [{ "type": "command", "command": "nd7 hook", "timeout": 5 }] }],
-    "SessionEnd":       [{ "hooks": [{ "type": "command", "command": "nd7 hook", "timeout": 1 }] }]
+    "SessionStart":       [{ "hooks": [{ "type": "command", "command": "nd7", "args": ["hook"], "timeout": 5 }] }],
+    "UserPromptSubmit":   [{ "hooks": [{ "type": "command", "command": "nd7", "args": ["hook"], "timeout": 5 }] }],
+    "PreToolUse":         [{ "hooks": [{ "type": "command", "command": "nd7", "args": ["hook"], "timeout": 5 }] }],
+    "PostToolUse":        [{ "hooks": [{ "type": "command", "command": "nd7", "args": ["hook"], "timeout": 5 }] }],
+    "PostToolUseFailure": [{ "hooks": [{ "type": "command", "command": "nd7", "args": ["hook"], "timeout": 5 }] }],
+    "Stop":               [{ "hooks": [{ "type": "command", "command": "nd7", "args": ["hook"], "timeout": 5 }] }],
+    "SessionEnd":         [{ "hooks": [{ "type": "command", "command": "nd7", "args": ["hook"], "timeout": 1 }] }]
   }
 }
 ```
+
+Any of the other documented events (`SubagentStart`, `SubagentStop`,
+`Notification`, `PreCompact`, `CwdChanged`, …) can be added the same way and
+will be recorded as `kind: hook`. Two are worth leaving out unless you need
+them: `MessageDisplay` fires per batch of streamed assistant text and was 37%
+of all frames in a test session, and `PostToolBatch` repeats every tool
+response of a batch.
 
 Notes, from the Claude Code hooks reference (https://code.claude.com/docs/en/hooks):
 
 - Omitting `matcher` matches every tool. `timeout` is in seconds.
 - A hook that exits non-zero (other than 2) or times out does not block the
-  agent; the action proceeds. `nd7 hook` always exits 0 and never prints
-  decisions, so it cannot interfere with the session.
+  agent; the action proceeds. `nd7 hook` never prints to stdout, so it cannot
+  make a control decision.
 - `SessionEnd` hooks share a 1.5 s budget, hence the shorter timeout.
-- Hook payloads carry no timestamp; `nd7` stamps events at invocation time.
-
-The `Stop` hook is optional. It gives a turn boundary and the last assistant
-message; drop it if you want a smaller log.
+- Hook payloads carry no timestamp; `nd7` stamps events at invocation time,
+  before reading stdin.
 
 ## Read a session
+
+Logs live in `$XDG_STATE_HOME/nd7/sessions/<session-id>/` (default
+`~/.local/state/nd7/sessions/`), one `events.ndjson` plus a `lock` file per
+session. Until the reader exists, standard tools work:
+
+```sh
+ls ~/.local/state/nd7/sessions/
+tail -f ~/.local/state/nd7/sessions/<session-id>/events.ndjson \
+  | jq -c '{seq, kind, ev: .body.hook_event_name, tool: .body.tool_name}'
+```
+
+Planned commands, not yet implemented:
 
 ```sh
 nd7 sessions              # list recorded sessions, newest first
@@ -68,9 +105,23 @@ nd7 show <session-id> --json   # raw events, one per line
 nd7 verify <session-id>   # recompute the hash chain
 ```
 
-Logs live in `$XDG_STATE_HOME/nd7/sessions/<session-id>/` (default
-`~/.local/state/nd7/sessions/`). See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
-for the layout and [docs/SCHEMA.md](docs/SCHEMA.md) for the event format.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the layout and
+[docs/SCHEMA.md](docs/SCHEMA.md) for the event format.
+
+## Layout
+
+```
+src/lib.rs            nd7_core: everything the binaries share
+src/hook/input.rs     typed model of every Claude Code hook payload (FromStr)
+src/hook/event.rs     the nd7 envelope and body
+src/hook/recorder.rs  invocation facts (ts, host, parent pid) and the transform
+src/writer.rs         the per-session append-only log, lock included
+src/bin/nd7audit.rs   the hook binary: parse, transform, append
+tests/                multi-process concurrency test against the real binary
+```
+
+The hook path is plain blocking I/O with no async runtime; see ADR-0003 for
+the measurements behind that and behind not running a daemon.
 
 ## Documents
 
@@ -84,3 +135,4 @@ for the layout and [docs/SCHEMA.md](docs/SCHEMA.md) for the event format.
 ## Status
 
 Pre-alpha. The schema is a draft and will change until it is marked `v1`.
+Frames written today carry no `prev`/`hash` yet; the chain lands with M4.

@@ -39,16 +39,26 @@ is shown only to prove the seams exist.
 
 Claude Code runs the configured command for each hook event and pipes one JSON
 object to its stdin (verified against https://code.claude.com/docs/en/hooks).
-`nd7 hook` does the following, in order, and nothing else:
+The binary is `nd7audit`, installed on `PATH` as `nd7` and registered in exec
+form (`"command": "nd7", "args": ["hook"]`) so no shell sits between Claude
+Code and the recorder. It does the following, in order, and nothing else:
 
-1. Take the invocation timestamp (wall clock, nanosecond resolution; plus a
-   monotonic reading for ordering within a process, see SCHEMA.md).
-2. Read stdin to EOF and parse the JSON with serde.
-3. Dispatch on `hook_event_name` to build one event of the matching kind.
-   Unknown event names are still recorded, as a generic `hook` event, so an
-   upgrade of Claude Code never causes silent data loss.
-4. Append the event to the session log (see writer).
+1. Take the invocation facts: wall-clock timestamp at nanosecond resolution,
+   hostname, parent pid (`hook::Recorder::now`). Before reading stdin, so `ts`
+   marks when the hook fired.
+2. Read stdin to EOF and parse the JSON into the typed payload model
+   (`hook::HookInput`, via `FromStr`). All 33 documented events are typed;
+   the payload is also kept whole.
+3. Transform into one event (`Recorder::event`). Six kinds have typed bodies;
+   everything else, including event names this build has never seen, becomes
+   a `hook` event carrying the raw payload, so an upgrade of Claude Code never
+   causes silent data loss.
+4. Append the event to the session log (`writer::SessionLog::append`).
 5. Exit 0 with no stdout.
+
+The crate is a library, `nd7_core`, plus binary targets. `hook` is pure and
+never touches the filesystem; `writer` is the only module that knows where
+events live. The binary is the composition point, about ten lines.
 
 Rules:
 
@@ -60,9 +70,16 @@ Rules:
   under that. No network, no threads, no config parsing beyond environment
   variables.
 
-Why one binary with subcommands instead of separate hook binaries: one install
-step, one settings snippet, and the hook path stays the same when we add
-events.
+Why a library plus thin binaries: the writer and the event model are shared by
+every future producer (Codex hooks, the kernel collector) and by the reader.
+Cargo binaries cannot import each other, so shared code lives in `src/lib.rs`.
+Adding a tool is one `[[bin]]` entry.
+
+Why no async runtime and no daemon: the hook is a straight line, read stdin,
+transform, one append. Measurements (ADR-0003) put process spawn at ~4 ms and
+the append at ~1 ms; a daemon could only remove the latter while adding
+lifecycle, durability and version-skew problems. Revisit when the Phase 2
+collector, which is long-running anyway, becomes the natural single writer.
 
 Why not `async: true` in the hook config: async hooks are not awaited, so an
 event could be appended after a later event's hook already ran, which breaks
@@ -74,11 +91,16 @@ cost, equally invisible. Revisit if measurements say otherwise.
 One append-only file per session. The writer:
 
 1. Resolves the session directory from `session_id`.
-2. Takes an exclusive advisory lock on the directory's `lock` file (`flock`).
-   Claude Code can run several tool calls, and thus several hooks, at the same
-   time; without the lock, sequence numbers and the hash chain race.
+2. Takes an exclusive advisory lock on the directory's `lock` file
+   (`std::fs::File::lock`, `flock` underneath). Claude Code can run several
+   tool calls, and thus several hooks, at the same time; without the lock,
+   sequence numbers and the hash chain race. **Done.** Verified by a
+   16-thread unit test and a 40-process integration test, both of which fail
+   when the lock line is removed.
 3. Reads the chain head (`head`: last `seq` and last `hash`) from a small
-   sidecar file, so appending does not require scanning the log.
+   sidecar file, so appending does not require scanning the log. **Pending**:
+   today `seq` is the log's line count, read under the lock. Correct, but it
+   costs ~8 ms per 5k lines.
 4. Fills in `seq`, `prev`, computes `hash`, serializes the frame, appends it
    with a single `write` on an `O_APPEND` file descriptor.
 5. Rewrites `head`, releases the lock.
