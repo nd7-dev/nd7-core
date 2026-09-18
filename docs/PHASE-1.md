@@ -25,7 +25,7 @@ matters only where noted.
   `prompt`, `tool_call`, `tool_result`, `session_end`, `turn_end`, plus the
   `hook` catch-all. Hoist `argv` and `paths`. Unit tests from the fixtures.
 
-- [~] **M4. Hash chain.** (`flock` on append landed 2026-09-18 with thread and 40-process tests; `head`, `prev`/`hash`, repair and `verify` pending) `prev`/`hash` with BLAKE3, `head` sidecar, `flock`
+- [~] **M4. Hash chain.** (`flock` landed 2026-09-18; `head` sidecar, BLAKE3 `prev`/`hash` with genesis bound to `session_id`, and chain tests landed 2026-09-19; stale-head repair and `verify` pending) `prev`/`hash` with BLAKE3, `head` sidecar, `flock`
   on append, stale-head repair. `nd7 verify` recomputes the chain and prints
   the trust caveat. Test: tamper with a byte, verify fails at the right seq.
 

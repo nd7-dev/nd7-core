@@ -98,12 +98,16 @@ One append-only file per session. The writer:
    16-thread unit test and a 40-process integration test, both of which fail
    when the lock line is removed.
 3. Reads the chain head (`head`: last `seq` and last `hash`) from a small
-   sidecar file, so appending does not require scanning the log. **Pending**:
-   today `seq` is the log's line count, read under the lock. Correct, but it
-   costs ~8 ms per 5k lines.
+   sidecar file, so appending does not require scanning the log. **Done.**
+   A missing `head` means a fresh session; genesis `prev` is
+   `BLAKE3(session_id)`. Repair of a stale or missing `head` on an existing
+   log is still pending: today that fails loudly and drops the event.
 4. Fills in `seq`, `prev`, computes `hash`, serializes the frame, appends it
-   with a single `write` on an `O_APPEND` file descriptor.
-5. Rewrites `head`, releases the lock.
+   with a single `write` on an `O_APPEND` file descriptor. **Done.** The frame
+   is serialized once with `hash` absent, those bytes are hashed, and the hash
+   is spliced in as the last member (`Event::seal`), so `verify` needs no
+   serializer, only the same cut (`split_sealed`).
+5. Rewrites `head` via `head.tmp` and `rename`, releases the lock. **Done.**
 
 Crash safety: if the process dies between 4 and 5, `head` is stale by one
 event. The writer detects this on the next append by checking that the last

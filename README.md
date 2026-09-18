@@ -21,9 +21,14 @@ format is the contract.
   `tool_result` (success and failure), `session_end`, `turn_end`. Every other
   hook event is kept whole under `kind: hook`, so a Claude Code upgrade never
   loses data.
+- Frames are hash-chained. Each frame ends with its BLAKE3 `hash`, computed
+  over the exact bytes written, and carries `prev`, the hash of the frame
+  before it; the first frame's `prev` is the hash of the session id. A `head`
+  sidecar holds the last `seq` and `hash`, so an append reads two small files
+  instead of scanning the log.
 
-Not there yet, in order of arrival: the BLAKE3 hash chain and `head` sidecar,
-the `verify` command, and the reader (`sessions`, `show`). See
+Not there yet, in order of arrival: repair of a missing or stale `head` on an
+existing log, the `verify` command, and the reader (`sessions`, `show`). See
 [docs/PHASE-1.md](docs/PHASE-1.md).
 
 Phase 1 records **intent only**: what Claude Code said it was about to do and
@@ -135,4 +140,4 @@ the measurements behind that and behind not running a daemon.
 ## Status
 
 Pre-alpha. The schema is a draft and will change until it is marked `v1`.
-Frames written today carry no `prev`/`hash` yet; the chain lands with M4.
+Frames carry `prev` and `hash`; nothing verifies them yet, `verify` is next.
