@@ -8,11 +8,10 @@
 //! Field order matters: the writer hashes the exact bytes it writes, and
 //! serde_json emits struct fields in declaration order. Do not reorder.
 
-
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use super::input::{Common, HookEvent, HookInput, PermissionMode};
+use super::input::{Common, HookEvent, PermissionMode};
 
 /// Schema version written into every frame. `0` while drafting.
 pub const SCHEMA_VERSION: u16 = 0;
@@ -146,41 +145,8 @@ pub enum Detail {
     },
 }
 
-/// Recorder-side facts that go into the frame alongside the hook payload.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Recorded {
-    pub ts: i64,
-    pub host: String,
-    pub hook_ppid: Option<u32>,
-}
-
-impl Event {
-    /// Transform a parsed hook payload into one event.
-    ///
-    /// `raw` is the payload as a JSON object; it is only stored for kinds
-    /// without a typed body. `seq` is left at 0 for the writer to assign.
-    pub fn from_hook(input: HookInput, raw: Map<String, Value>, rec: Recorded) -> Event {
-        let HookInput { common, event } = input;
-        let (kind, detail) = Detail::from_hook_event(event, raw);
-        let session_id = common.session_id.clone();
-        let body = Body::new(common, rec.hook_ppid, detail);
-        Event {
-            v: SCHEMA_VERSION,
-            session_id,
-            seq: 0,
-            ts: rec.ts,
-            host: rec.host,
-            source: SOURCE_CLAUDE_CODE.to_owned(),
-            kind,
-            prev: None,
-            body,
-            hash: None,
-        }
-    }
-}
-
 impl Body {
-    fn new(common: Common, hook_ppid: Option<u32>, detail: Detail) -> Body {
+    pub(super) fn new(common: Common, hook_ppid: Option<u32>, detail: Detail) -> Body {
         Body {
             cwd: common.cwd,
             transcript_path: common.transcript_path,
@@ -196,7 +162,7 @@ impl Body {
 }
 
 impl Detail {
-    fn from_hook_event(event: HookEvent, raw: Map<String, Value>) -> (Kind, Detail) {
+    pub(super) fn from_hook_event(event: HookEvent, raw: Map<String, Value>) -> (Kind, Detail) {
         match event {
             HookEvent::SessionStart(e) => (
                 Kind::SessionStart,
@@ -295,20 +261,11 @@ fn hoist_paths(input: &Value) -> Option<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn rec() -> Recorded {
-        Recorded {
-            ts: 1_700_000_000_000_000_000,
-            host: "laptop".into(),
-            hook_ppid: Some(4242),
-        }
-    }
+    use crate::hook::{HookInput, Recorder};
 
     fn transform(raw: &str) -> Event {
-        let value: Value = serde_json::from_str(raw).unwrap();
-        let map = value.as_object().unwrap().clone();
-        let input = HookInput::from_value(value).unwrap_or_else(|e| panic!("{e}"));
-        Event::from_hook(input, map, rec())
+        let input: HookInput = raw.parse().unwrap_or_else(|e| panic!("{e}"));
+        Recorder::new(1_700_000_000_000_000_000, "laptop".into(), 4242).event(input)
     }
 
     const BASE: &str = r#""session_id": "abc123", "transcript_path": "/t.jsonl", "cwd": "/p", "permission_mode": "auto""#;
@@ -323,7 +280,15 @@ mod tests {
         assert_eq!(ev.source, SOURCE_CLAUDE_CODE);
         assert_eq!(ev.body.permission_mode.as_deref(), Some("auto"));
         assert_eq!(ev.body.hook_ppid, Some(4242));
-        let Detail::ToolCall { argv, paths, tool_use_id, .. } = ev.body.detail else { panic!() };
+        let Detail::ToolCall {
+            argv,
+            paths,
+            tool_use_id,
+            ..
+        } = ev.body.detail
+        else {
+            panic!()
+        };
         assert_eq!(argv.as_deref(), Some("npm test"));
         assert_eq!(paths, None);
         assert_eq!(tool_use_id, "toolu_01");
@@ -335,7 +300,9 @@ mod tests {
             r#"{{{BASE}, "hook_event_name": "PreToolUse", "tool_name": "Write",
                  "tool_input": {{"file_path": "/p/a.rs", "content": "x"}}, "tool_use_id": "toolu_02"}}"#
         ));
-        let Detail::ToolCall { argv, paths, .. } = ev.body.detail else { panic!() };
+        let Detail::ToolCall { argv, paths, .. } = ev.body.detail else {
+            panic!()
+        };
         assert_eq!(argv, None);
         assert_eq!(paths, Some(vec!["/p/a.rs".to_owned()]));
     }
@@ -348,7 +315,15 @@ mod tests {
                  "error": "Exit code 1", "is_interrupt": false, "duration_ms": 7}}"#
         ));
         assert_eq!(ev.kind, Kind::ToolResult);
-        let Detail::ToolResult { ok, tool_response, duration_ms, .. } = ev.body.detail else { panic!() };
+        let Detail::ToolResult {
+            ok,
+            tool_response,
+            duration_ms,
+            ..
+        } = ev.body.detail
+        else {
+            panic!()
+        };
         assert!(!ok);
         assert_eq!(tool_response, "Exit code 1");
         assert_eq!(duration_ms, Some(7));
@@ -360,7 +335,12 @@ mod tests {
             r#"{{{BASE}, "hook_event_name": "SessionStart", "source": "resume"}}"#
         ));
         assert_eq!(ev.kind, Kind::SessionStart);
-        assert_eq!(ev.body.detail, Detail::SessionStart { reason: "resume".into() });
+        assert_eq!(
+            ev.body.detail,
+            Detail::SessionStart {
+                reason: "resume".into()
+            }
+        );
     }
 
     #[test]
@@ -371,22 +351,34 @@ mod tests {
         ));
         assert_eq!(ev.kind, Kind::Hook);
         assert_eq!(ev.body.agent_id.as_deref(), Some("a1"));
-        let Detail::Hook { raw } = ev.body.detail else { panic!() };
+        let Detail::Hook { raw } = ev.body.detail else {
+            panic!()
+        };
         assert_eq!(raw["hook_event_name"], "SubagentStop");
 
-        let ev = transform(&format!(r#"{{{BASE}, "hook_event_name": "Brand-New", "z": 1}}"#));
+        let ev = transform(&format!(
+            r#"{{{BASE}, "hook_event_name": "Brand-New", "z": 1}}"#
+        ));
         assert_eq!(ev.kind, Kind::Hook);
         assert_eq!(ev.body.hook_event_name, "Brand-New");
     }
 
     #[test]
     fn frame_has_deterministic_field_order_and_round_trips() {
-        let ev = transform(&format!(r#"{{{BASE}, "hook_event_name": "UserPromptSubmit", "prompt": "hi"}}"#));
+        let ev = transform(&format!(
+            r#"{{{BASE}, "hook_event_name": "UserPromptSubmit", "prompt": "hi"}}"#
+        ));
         let line = serde_json::to_string(&ev).unwrap();
-        assert!(line.starts_with(r#"{"v":0,"session_id":"abc123","seq":0,"ts":"#), "{line}");
+        assert!(
+            line.starts_with(r#"{"v":0,"session_id":"abc123","seq":0,"ts":"#),
+            "{line}"
+        );
         assert!(line.contains(r#""kind":"prompt""#));
         assert!(line.contains(r#""text":"hi""#));
-        assert!(!line.contains("prev"), "prev must be absent until hashing lands");
+        assert!(
+            !line.contains("prev"),
+            "prev must be absent until hashing lands"
+        );
         let back: Event = serde_json::from_str(&line).unwrap();
         assert_eq!(back, ev);
     }

@@ -14,9 +14,10 @@
 //!   new value in a future Claude Code release parses instead of erroring.
 //! - Tool inputs and responses are tool-specific and undocumented beyond
 //!   their examples, so they stay `serde_json::Value`.
-//! - An unknown `hook_event_name` parses to [`HookEvent::Unknown`] with the
-//!   full payload attached.
+//! - Every [`HookInput`] keeps the payload it was parsed from in `raw`, so
+//!   an unknown `hook_event_name` ([`HookEvent::Unknown`]) loses nothing.
 
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -27,12 +28,14 @@ use serde_json::{Map, Value};
 
 /// A fully parsed hook payload: the common envelope and the event body.
 ///
-/// Built with [`HookInput::parse`] rather than derived, because
+/// Built via [`FromStr`] (`raw.parse::<HookInput>()`) rather than derived, because
 /// `hook_event_name` belongs to both halves.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HookInput {
     pub common: Common,
     pub event: HookEvent,
+    /// The payload as received. Stored whole for `hook` kinds and `--raw`.
+    pub raw: Map<String, Value>,
 }
 
 /// Why a payload could not be turned into a [`HookInput`].
@@ -64,25 +67,39 @@ impl std::fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
-impl HookInput {
-    /// Parse a raw hook payload.
+impl FromStr for HookInput {
+    type Err = ParseError;
+
+    /// Parse a raw hook payload: `raw.parse::<HookInput>()`.
     ///
     /// Parsing is done in two steps so that an unknown event name degrades to
     /// [`HookEvent::Unknown`] while a known event with a malformed body is
     /// reported as [`ParseError::Event`].
-    pub fn parse(raw: &str) -> Result<Self, ParseError> {
+    fn from_str(raw: &str) -> Result<Self, ParseError> {
         let value: Value = serde_json::from_str(raw).map_err(ParseError::Json)?;
         Self::from_value(value)
     }
+}
 
-    /// Same as [`HookInput::parse`] for an already decoded JSON value.
+impl HookInput {
+    /// Same as the [`FromStr`] impl for an already decoded JSON value.
     pub fn from_value(value: Value) -> Result<Self, ParseError> {
-        let name = value
+        let raw = match value {
+            Value::Object(map) => map,
+            other => {
+                return Err(ParseError::Json(serde::de::Error::custom(format!(
+                    "expected a JSON object, got {other}"
+                ))));
+            }
+        };
+
+        let name = raw
             .get("hook_event_name")
             .and_then(Value::as_str)
             .ok_or(ParseError::MissingEventName)?
             .to_owned();
 
+        let value = Value::Object(raw.clone());
         let common: Common = serde_json::from_value(value.clone()).map_err(ParseError::Common)?;
 
         let event = if HookEvent::KNOWN_NAMES.contains(&name.as_str()) {
@@ -91,14 +108,10 @@ impl HookInput {
                 source,
             })?
         } else {
-            let payload = match value {
-                Value::Object(map) => map,
-                _ => Map::new(),
-            };
-            HookEvent::Unknown { name, payload }
+            HookEvent::Unknown { name }
         };
 
-        Ok(HookInput { common, event })
+        Ok(HookInput { common, event, raw })
     }
 }
 
@@ -233,9 +246,11 @@ pub enum HookEvent {
     Elicitation(Elicitation),
     ElicitationResult(ElicitationResult),
 
-    /// An event this build does not model. `payload` is the whole object.
+    /// An event this build does not model. The payload is in [`HookInput::raw`].
     #[serde(skip)]
-    Unknown { name: String, payload: Map<String, Value> },
+    Unknown {
+        name: String,
+    },
 }
 
 impl HookEvent {
@@ -1050,7 +1065,7 @@ mod tests {
     use super::*;
 
     fn parse(raw: &str) -> HookInput {
-        HookInput::parse(raw).unwrap_or_else(|e| panic!("{e}"))
+        raw.parse::<HookInput>().unwrap_or_else(|e| panic!("{e}"))
     }
 
     #[test]
@@ -1075,8 +1090,13 @@ mod tests {
             }"#,
         );
         assert_eq!(input.common.permission_mode, Some(PermissionMode::Default));
-        assert_eq!(input.common.prompt_id.as_deref(), Some("550e8400-e29b-41d4-a716-446655440000"));
-        let HookEvent::PreToolUse(e) = input.event else { panic!("wrong variant") };
+        assert_eq!(
+            input.common.prompt_id.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
+        let HookEvent::PreToolUse(e) = input.event else {
+            panic!("wrong variant")
+        };
         assert_eq!(e.tool.tool_name, "Bash");
         assert_eq!(e.tool.tool_input["command"], "npm test");
         assert_eq!(e.tool.tool_use_id, "toolu_01ABC123...");
@@ -1100,7 +1120,9 @@ mod tests {
             }"#,
         );
         assert!(input.common.permission_mode.is_none());
-        let HookEvent::SessionStart(e) = input.event else { panic!("wrong variant") };
+        let HookEvent::SessionStart(e) = input.event else {
+            panic!("wrong variant")
+        };
         assert_eq!(e.source, SessionSource::Resume);
         assert_eq!(e.model.as_deref(), Some("claude-opus-5"));
         assert_eq!(e.context_tokens, Some(182340));
@@ -1123,7 +1145,9 @@ mod tests {
               "duration_ms": 12
             }"#,
         );
-        let HookEvent::PostToolUse(e) = input.event else { panic!("wrong variant") };
+        let HookEvent::PostToolUse(e) = input.event else {
+            panic!("wrong variant")
+        };
         assert_eq!(e.tool.tool_name, "Write");
         assert_eq!(e.tool_response["type"], "create");
         assert_eq!(e.duration_ms, Some(12));
@@ -1146,7 +1170,9 @@ mod tests {
               "duration_ms": 4187
             }"#,
         );
-        let HookEvent::PostToolUseFailure(e) = input.event else { panic!("wrong variant") };
+        let HookEvent::PostToolUseFailure(e) = input.event else {
+            panic!("wrong variant")
+        };
         assert!(e.error.starts_with("Exit code 1"));
         assert_eq!(e.is_interrupt, Some(false));
     }
@@ -1172,7 +1198,9 @@ mod tests {
               ]
             }"#,
         );
-        let HookEvent::PermissionRequest(e) = input.event else { panic!("wrong variant") };
+        let HookEvent::PermissionRequest(e) = input.event else {
+            panic!("wrong variant")
+        };
         let s = &e.permission_suggestions.unwrap()[0];
         assert_eq!(s.kind, PermissionUpdateKind::AddRules);
         assert_eq!(s.destination, PermissionDestination::LocalSettings);
@@ -1195,7 +1223,9 @@ mod tests {
               ]
             }"#,
         );
-        let HookEvent::PostToolBatch(e) = input.event else { panic!("wrong variant") };
+        let HookEvent::PostToolBatch(e) = input.event else {
+            panic!("wrong variant")
+        };
         assert_eq!(e.tool_calls.len(), 2);
         assert!(e.tool_calls[0].tool_response.is_string());
     }
@@ -1219,7 +1249,9 @@ mod tests {
               ]
             }"#,
         );
-        let HookEvent::Stop(e) = input.event else { panic!("wrong variant") };
+        let HookEvent::Stop(e) = input.event else {
+            panic!("wrong variant")
+        };
         assert!(e.stop_hook_active);
         let tasks = e.background_tasks.unwrap();
         assert_eq!(tasks[0].kind, "shell");
@@ -1247,7 +1279,9 @@ mod tests {
         );
         // agent_id / agent_type land in both the common fields and the body.
         assert_eq!(input.common.agent_id.as_deref(), Some("def456"));
-        let HookEvent::SubagentStop(e) = input.event else { panic!("wrong variant") };
+        let HookEvent::SubagentStop(e) = input.event else {
+            panic!("wrong variant")
+        };
         assert_eq!(e.agent_type, "Explore");
         assert_eq!(e.background_tasks, Some(vec![]));
     }
@@ -1267,7 +1301,9 @@ mod tests {
               "delta": "Here is the plan:\n"
             }"#,
         );
-        let HookEvent::MessageDisplay(e) = input.event else { panic!("wrong variant") };
+        let HookEvent::MessageDisplay(e) = input.event else {
+            panic!("wrong variant")
+        };
         assert!(!e.is_final);
         assert_eq!(e.index, 0);
     }
@@ -1291,7 +1327,9 @@ mod tests {
               "pricing": "catalog"
             }"#,
         );
-        let HookEvent::PreModelSwitch(e) = input.event else { panic!("wrong variant") };
+        let HookEvent::PreModelSwitch(e) = input.event else {
+            panic!("wrong variant")
+        };
         assert_eq!(e.source, ModelSwitchSource::Command);
         assert_eq!(e.pricing, PricingSource::Catalog);
     }
@@ -1308,7 +1346,9 @@ mod tests {
               "requested_schema": { "type": "object", "properties": { "username": { "type": "string", "title": "Username" } } }
             }"#,
         );
-        let HookEvent::Elicitation(e) = a.event else { panic!("wrong variant") };
+        let HookEvent::Elicitation(e) = a.event else {
+            panic!("wrong variant")
+        };
         assert_eq!(e.mode, Some(ElicitationMode::Form));
         assert!(e.requested_schema.is_some());
 
@@ -1323,7 +1363,9 @@ mod tests {
               "elicitation_id": "elicit-123"
             }"#,
         );
-        let HookEvent::ElicitationResult(e) = b.event else { panic!("wrong variant") };
+        let HookEvent::ElicitationResult(e) = b.event else {
+            panic!("wrong variant")
+        };
         assert_eq!(e.action, ElicitationAction::Accept);
         assert_eq!(e.content.unwrap()["username"], "alice");
     }
@@ -1332,27 +1374,87 @@ mod tests {
     fn small_events() {
         let base = r#""session_id": "abc123", "transcript_path": "/t.jsonl", "cwd": "/""#;
         let cases = [
-            (r#""hook_event_name": "SessionEnd", "reason": "other""#, "SessionEnd"),
+            (
+                r#""hook_event_name": "SessionEnd", "reason": "other""#,
+                "SessionEnd",
+            ),
             (r#""hook_event_name": "Setup", "trigger": "init""#, "Setup"),
-            (r#""hook_event_name": "InstructionsLoaded", "file_path": "/p/CLAUDE.md", "memory_type": "Project", "load_reason": "session_start""#, "InstructionsLoaded"),
-            (r#""hook_event_name": "UserPromptSubmit", "prompt": "hi""#, "UserPromptSubmit"),
-            (r#""hook_event_name": "UserPromptExpansion", "expansion_type": "slash_command", "command_name": "example-skill", "command_args": "arg1 arg2", "command_source": "plugin", "prompt": "/example-skill arg1 arg2""#, "UserPromptExpansion"),
-            (r#""hook_event_name": "StopFailure", "error": "rate_limit", "error_details": "429 Too Many Requests", "last_assistant_message": "API Error: Rate limit reached""#, "StopFailure"),
-            (r#""hook_event_name": "Notification", "message": "Claude needs your permission", "title": "Permission needed", "notification_type": "permission_prompt""#, "Notification"),
-            (r#""hook_event_name": "PermissionDenied", "tool_name": "Bash", "tool_input": {"command": "rm -rf /tmp/build"}, "tool_use_id": "toolu_01", "reason": "[Irreversible Local Destruction]""#, "PermissionDenied"),
-            (r#""hook_event_name": "SubagentStart", "agent_id": "agent-abc123", "agent_type": "Explore""#, "SubagentStart"),
-            (r#""hook_event_name": "TaskCreated", "task_id": "task-001", "task_subject": "Implement user authentication", "task_description": "Add login and signup endpoints", "teammate_name": "implementer", "team_name": "session-a1b2c3d4""#, "TaskCreated"),
-            (r#""hook_event_name": "TaskCompleted", "task_id": "task-001", "task_subject": "Implement user authentication""#, "TaskCompleted"),
-            (r#""hook_event_name": "TeammateIdle", "teammate_name": "researcher", "team_name": "session-a1b2c3d4""#, "TeammateIdle"),
-            (r#""hook_event_name": "ConfigChange", "source": "project_settings", "file_path": "/p/.claude/settings.json""#, "ConfigChange"),
-            (r#""hook_event_name": "CwdChanged", "old_cwd": "/p", "new_cwd": "/p/src""#, "CwdChanged"),
-            (r#""hook_event_name": "DirectoryAdded", "directory": "/other", "source": "slash_command""#, "DirectoryAdded"),
-            (r#""hook_event_name": "FileChanged", "file_path": "/p/.envrc", "event": "change""#, "FileChanged"),
-            (r#""hook_event_name": "WorktreeCreate", "name": "feature-auth""#, "WorktreeCreate"),
-            (r#""hook_event_name": "WorktreeRemove", "worktree_path": "/p/.claude/worktrees/feature-auth""#, "WorktreeRemove"),
-            (r#""hook_event_name": "PreCompact", "trigger": "manual", "custom_instructions": null"#, "PreCompact"),
-            (r#""hook_event_name": "PostCompact", "trigger": "auto", "compact_summary": "Summary...""#, "PostCompact"),
-            (r#""hook_event_name": "PostModelSwitch", "from_model": "a", "to_model": "b", "requested_model": null, "source": "auto", "context_tokens": 0, "prompt_cache_warm": false, "cache_ttl": "1h", "estimated_cache_write_usd": 0.0, "pricing": "default""#, "PostModelSwitch"),
+            (
+                r#""hook_event_name": "InstructionsLoaded", "file_path": "/p/CLAUDE.md", "memory_type": "Project", "load_reason": "session_start""#,
+                "InstructionsLoaded",
+            ),
+            (
+                r#""hook_event_name": "UserPromptSubmit", "prompt": "hi""#,
+                "UserPromptSubmit",
+            ),
+            (
+                r#""hook_event_name": "UserPromptExpansion", "expansion_type": "slash_command", "command_name": "example-skill", "command_args": "arg1 arg2", "command_source": "plugin", "prompt": "/example-skill arg1 arg2""#,
+                "UserPromptExpansion",
+            ),
+            (
+                r#""hook_event_name": "StopFailure", "error": "rate_limit", "error_details": "429 Too Many Requests", "last_assistant_message": "API Error: Rate limit reached""#,
+                "StopFailure",
+            ),
+            (
+                r#""hook_event_name": "Notification", "message": "Claude needs your permission", "title": "Permission needed", "notification_type": "permission_prompt""#,
+                "Notification",
+            ),
+            (
+                r#""hook_event_name": "PermissionDenied", "tool_name": "Bash", "tool_input": {"command": "rm -rf /tmp/build"}, "tool_use_id": "toolu_01", "reason": "[Irreversible Local Destruction]""#,
+                "PermissionDenied",
+            ),
+            (
+                r#""hook_event_name": "SubagentStart", "agent_id": "agent-abc123", "agent_type": "Explore""#,
+                "SubagentStart",
+            ),
+            (
+                r#""hook_event_name": "TaskCreated", "task_id": "task-001", "task_subject": "Implement user authentication", "task_description": "Add login and signup endpoints", "teammate_name": "implementer", "team_name": "session-a1b2c3d4""#,
+                "TaskCreated",
+            ),
+            (
+                r#""hook_event_name": "TaskCompleted", "task_id": "task-001", "task_subject": "Implement user authentication""#,
+                "TaskCompleted",
+            ),
+            (
+                r#""hook_event_name": "TeammateIdle", "teammate_name": "researcher", "team_name": "session-a1b2c3d4""#,
+                "TeammateIdle",
+            ),
+            (
+                r#""hook_event_name": "ConfigChange", "source": "project_settings", "file_path": "/p/.claude/settings.json""#,
+                "ConfigChange",
+            ),
+            (
+                r#""hook_event_name": "CwdChanged", "old_cwd": "/p", "new_cwd": "/p/src""#,
+                "CwdChanged",
+            ),
+            (
+                r#""hook_event_name": "DirectoryAdded", "directory": "/other", "source": "slash_command""#,
+                "DirectoryAdded",
+            ),
+            (
+                r#""hook_event_name": "FileChanged", "file_path": "/p/.envrc", "event": "change""#,
+                "FileChanged",
+            ),
+            (
+                r#""hook_event_name": "WorktreeCreate", "name": "feature-auth""#,
+                "WorktreeCreate",
+            ),
+            (
+                r#""hook_event_name": "WorktreeRemove", "worktree_path": "/p/.claude/worktrees/feature-auth""#,
+                "WorktreeRemove",
+            ),
+            (
+                r#""hook_event_name": "PreCompact", "trigger": "manual", "custom_instructions": null"#,
+                "PreCompact",
+            ),
+            (
+                r#""hook_event_name": "PostCompact", "trigger": "auto", "compact_summary": "Summary...""#,
+                "PostCompact",
+            ),
+            (
+                r#""hook_event_name": "PostModelSwitch", "from_model": "a", "to_model": "b", "requested_model": null, "source": "auto", "context_tokens": 0, "prompt_cache_warm": false, "cache_ttl": "1h", "estimated_cache_write_usd": 0.0, "pricing": "default""#,
+                "PostModelSwitch",
+            ),
         ];
         for (body, name) in cases {
             let input = parse(&format!("{{{base}, {body}}}"));
@@ -1367,9 +1469,17 @@ mod tests {
             r#"{"session_id": "s", "transcript_path": "/t", "cwd": "/", "permission_mode": "somethingNew",
                "hook_event_name": "SessionEnd", "reason": "bypass_permissions_disabled"}"#,
         );
-        assert_eq!(input.common.permission_mode, Some(PermissionMode::Other("somethingNew".into())));
-        let HookEvent::SessionEnd(e) = input.event else { panic!("wrong variant") };
-        assert_eq!(e.reason, SessionEndReason::Unrecognised("bypass_permissions_disabled".into()));
+        assert_eq!(
+            input.common.permission_mode,
+            Some(PermissionMode::Other("somethingNew".into()))
+        );
+        let HookEvent::SessionEnd(e) = input.event else {
+            panic!("wrong variant")
+        };
+        assert_eq!(
+            e.reason,
+            SessionEndReason::Unrecognised("bypass_permissions_disabled".into())
+        );
     }
 
     #[test]
@@ -1377,24 +1487,30 @@ mod tests {
         let input = parse(
             r#"{"session_id": "s", "transcript_path": "/t", "cwd": "/", "hook_event_name": "FutureThing", "x": 1}"#,
         );
-        let HookEvent::Unknown { name, payload } = input.event else { panic!("wrong variant") };
+        let payload = input.raw;
+        let HookEvent::Unknown { name } = input.event else {
+            panic!("wrong variant")
+        };
         assert_eq!(name, "FutureThing");
         assert_eq!(payload["x"], 1);
     }
 
     #[test]
     fn errors_are_distinguished() {
-        assert!(matches!(HookInput::parse("nope"), Err(ParseError::Json(_))));
         assert!(matches!(
-            HookInput::parse(r#"{"session_id": "s"}"#),
+            "nope".parse::<HookInput>(),
+            Err(ParseError::Json(_))
+        ));
+        assert!(matches!(
+            r#"{"session_id": "s"}"#.parse::<HookInput>(),
             Err(ParseError::MissingEventName)
         ));
         assert!(matches!(
-            HookInput::parse(r#"{"hook_event_name": "Stop"}"#),
+            r#"{"hook_event_name": "Stop"}"#.parse::<HookInput>(),
             Err(ParseError::Common(_))
         ));
         assert!(matches!(
-            HookInput::parse(r#"{"session_id": "s", "transcript_path": "/t", "cwd": "/", "hook_event_name": "Stop"}"#),
+            r#"{"session_id": "s", "transcript_path": "/t", "cwd": "/", "hook_event_name": "Stop"}"#.parse::<HookInput>(),
             Err(ParseError::Event { .. })
         ));
     }
