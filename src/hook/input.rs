@@ -17,9 +17,6 @@
 //! - An unknown `hook_event_name` parses to [`HookEvent::Unknown`] with the
 //!   full payload attached.
 
-// The recorder consumes these fields incrementally; suppress dead-code noise
-// for fields that are not read yet.
-#![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
