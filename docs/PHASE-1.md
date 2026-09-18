@@ -7,21 +7,21 @@ matters only where noted.
   [SCHEMA.md](SCHEMA.md) §5–6, record them in DECISIONS.md, mark the schema
   `v0`. No code.
 
-- [ ] **M1. One event in, one event out.** `cargo new nd7`. `nd7 hook` reads
+- [x] **M1. One event in, one event out.** (2026-09-18; `nd7 show` pending, see M5) `cargo new nd7`. `nd7 hook` reads
   stdin, parses the common hook fields plus `hook_event_name`, builds an
   envelope with `seq`, `ts`, `source`, `kind`, appends one NDJSON line to
   `$XDG_STATE_HOME/nd7/sessions/<id>/events.ndjson`. `nd7 show <id>` prints
   each line as `ts  kind  summary`. No hashing, no locking yet. Test by piping
   the docs' example `PreToolUse` JSON into it.
 
-- [ ] **M2. Install into a real Claude Code session.** Add the settings.json
+- [~] **M2. Install into a real Claude Code session.** (installed globally in exec form 2026-09-18; `Bash` response shape and `hook_ppid` verified in SCHEMA.md; `Write`/`Edit`/`Read` fixtures still to capture) Add the settings.json
   snippet, run a short session, read it back. Capture real payloads for
   `PostToolUse` (`tool_response` shape for `Bash`, `Edit`, `Read`),
   `SessionStart`, `SessionEnd`, `Stop` into `docs/payloads/` as fixtures.
   Resolve every `(verify)` in SCHEMA.md that a real payload can answer,
   including `hook_ppid`.
 
-- [ ] **M3. All Phase 1 event kinds.** Typed bodies for `session_start`,
+- [x] **M3. All Phase 1 event kinds.** (2026-09-18; tests use the docs' examples, real-payload fixtures pending M2) Typed bodies for `session_start`,
   `prompt`, `tool_call`, `tool_result`, `session_end`, `turn_end`, plus the
   `hook` catch-all. Hoist `argv` and `paths`. Unit tests from the fixtures.
 

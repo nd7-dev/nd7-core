@@ -7,7 +7,8 @@ change; after that, only additive changes within a major version.
 Field sources are marked:
 
 - **hook**: copied from the Claude Code hook payload (verified against
-  https://code.claude.com/docs/en/hooks on 2026-09-17).
+  https://code.claude.com/docs/en/hooks on 2026-09-18, and against real
+  payloads from a 116-event session recorded the same day).
 - **nd7**: computed by the recorder.
 - **(verify)**: believed true, not confirmed against docs or a real payload.
 
@@ -26,8 +27,8 @@ fields. Agent-specific data never appears here; it goes in `body`.
 | `host`       | string          | yes | nd7    | Hostname (or configured host id) of the machine that produced the event. Needed for remote continuity. |
 | `source`     | string          | yes | nd7    | Producer and evidence class. Phase 1: `intent:claude-code`. Reserved: `intent:codex`, `effect:es`, `effect:fanotify`, `effect:remote`. Format is `<class>:<producer>`. |
 | `kind`       | string          | yes | nd7    | Event kind, see section 2. |
-| `prev`       | string (hex)    | yes | nd7    | BLAKE3 hash of the previous frame in this file. All-zero for `seq` 0. |
-| `hash`       | string (hex)    | yes | nd7    | BLAKE3 over this frame's canonical bytes with `hash` absent (section 4). |
+| `prev`       | string (hex)    | yes | nd7    | BLAKE3 hash of the previous frame in this file. All-zero for `seq` 0. **Not yet written** (M4); the M1 writer omits the field. |
+| `hash`       | string (hex)    | yes | nd7    | BLAKE3 over this frame's canonical bytes with `hash` absent (section 4). **Not yet written** (M4). |
 | `sig`        | string          | opt | nd7    | Reserved for a signature over `hash`. Never emitted in Phase 1. |
 | `body`       | object          | yes | mixed  | Kind-specific fields, section 2. |
 
@@ -55,11 +56,13 @@ from the hook payload's common section:
 | `cwd`             | string | yes | hook   | Agent's working directory at the hook. **Join key** for effects. |
 | `transcript_path` | string | yes | hook   | Path to Claude Code's own transcript. Lets a reader cross-check our record against the agent's. |
 | `hook_event_name` | string | yes | hook   | Recorded even though `kind` is derived from it, so an unknown or renamed event is never lost. |
-| `permission_mode` | string | opt | hook   | `default`, `plan`, `acceptEdits`, `auto`, `dontAsk`, `bypassPermissions`. Absent on `SessionEnd` per docs. |
+| `permission_mode` | string | opt | hook   | `default`, `plan`, `acceptEdits`, `auto`, `dontAsk`, `bypassPermissions`. Verified present on `PreToolUse`, `PostToolUse`, `PostToolBatch`, `UserPromptSubmit`, `Stop`, `SubagentStop`; verified absent on `MessageDisplay`, `Notification`, `CwdChanged`, `ConfigChange`; absent on `SessionStart`/`SessionEnd` per docs. |
+| `scratchpad_dir`  | string | opt | hook   | Session scratch directory (Claude Code ≥ 2.1.257). Verified present on every event of the test session. Files the agent writes there are effects we will want to attribute, so this is a **join key**. Parsed, not yet stored in the body (next step). |
+| `effort`          | string | opt | hook   | Payload `effort.level`: `low`, `medium`, `high`, `xhigh`, `max`. Present in tool-use context (`PreToolUse`, `PostToolUse`, `PostToolBatch`, `Stop`, `SubagentStop` verified). Parsed, not yet stored (next step). |
 | `prompt_id`       | string | opt | hook   | UUID of the user turn. Absent before the first prompt; needs Claude Code ≥ 2.1.196 per docs. Groups the tool calls of one turn. |
 | `agent_id`        | string | opt | hook   | Present only inside a subagent. |
 | `agent_type`      | string | opt | hook   | Present only inside a subagent, e.g. `Explore`. |
-| `hook_ppid`       | u32    | opt | nd7    | Parent pid of the `nd7 hook` process. **Join key** for the future process-tree attribution. (verify) Whether the parent is the Claude Code process or an intermediate shell depends on how Claude Code spawns command hooks; if `args` is set the docs say the command is spawned without a shell. |
+| `hook_ppid`       | u32    | opt | nd7    | Parent pid of the `nd7 hook` process. **Join key** for the future process-tree attribution. Verified: with the hook registered in exec form (`"command": "nd7", "args": ["hook"]`) the parent is the `claude` process itself. In shell form (`"command": "nd7 hook"`) it is the intermediate `sh`, which is useless as a key. The install snippet must use exec form. |
 | `raw`             | object | opt | hook   | The full hook payload, kept only when a field we did not model is present or under `--raw`. Off by default to keep the log small. |
 
 ### `session_start`  (hook: `SessionStart`)
@@ -94,8 +97,9 @@ existing log; it does not start a new file.
 | `tool_use_id`   | string | yes | hook   | |
 | `tool_name`     | string | yes | hook   | |
 | `tool_input`    | object | opt | hook   | Repeated by the payload. Stored by default; dropping it in favour of the `tool_call` copy is an open size trade-off. |
-| `tool_response` | any    | yes | hook   | Shape is tool-specific and undocumented beyond "the output/response". For `Bash` it is expected to contain stdout, stderr and an exit status (verify against a real payload). |
-| `ok`            | bool   | yes | nd7    | `true` for `PostToolUse`. Claude Code has a separate `PostToolUseFailure` event; whether Phase 1 subscribes to it is open (section 6). |
+| `tool_response` | any    | yes | hook   | Shape is tool-specific and undocumented beyond "the output/response". Verified for `Bash`: `{stdout, stderr, interrupted, isImage, noOutputExpected, bashEditDiff?}`. **There is no exit code on success**; a non-zero exit arrives as `PostToolUseFailure` with `error` starting `Exit code N`. `bashEditDiff`, when present, holds `changedFiles` and a full unified diff per file the command modified, which is both the most valuable effect evidence in the whole payload and the reason frames reach 50 KB (section 6). `Write`/`Edit`/`Read` shapes still (verify); the docs show `{filePath, type: "create"}` for `Write`. For `PostToolUseFailure` this field holds the `error` string. |
+| `ok`            | bool   | yes | nd7    | `true` for `PostToolUse`, `false` for `PostToolUseFailure`. Decided: Phase 1 subscribes to both (ADR-0002). |
+| `duration_ms`   | u64    | opt | hook   | Tool execution time, excluding permission prompts and PreToolUse hooks. Verified present on `PostToolUse`. |
 
 ### `session_end`  (hook: `SessionEnd`)
 
@@ -107,7 +111,7 @@ existing log; it does not start a new file.
 work here. Absence of a `session_end` event means the session ended without
 Claude Code firing the hook (crash, kill), which the reader should say.
 
-### `turn_end`  (hook: `Stop`), optional in Phase 1
+### `turn_end`  (hook: `Stop`), on by default (ADR-0002)
 
 | field                    | type   | req | source | notes |
 |--------------------------|--------|-----|--------|-------|
@@ -118,7 +122,16 @@ Claude Code firing the hook (crash, kill), which the reader should say.
 
 Any `hook_event_name` we do not model is stored with `kind: hook` and
 `body.raw` set to the full payload. This keeps the recorder forward compatible
-with Claude Code releases.
+with Claude Code releases. The parser types all 33 documented events; only the
+six kinds above get a dedicated body, everything else lands here.
+
+Observed distribution over a 116-event session (2026-09-18): `MessageDisplay`
+43, `PreToolUse`/`PostToolUse`/`PostToolBatch` 16 each, `UserPromptSubmit` 8,
+`Stop` 7, `SubagentStop` 6, `Notification` 2, `CwdChanged` 1, `ConfigChange`
+1. `MessageDisplay` is 37% of frames and carries only streamed text; it is a
+candidate for dropping from the default registration. `PostToolBatch`
+duplicates every `PostToolUse` response of the batch and was the third-largest
+frame recorded; same candidate.
 
 ## 3. Join keys stored on purpose
 
@@ -131,7 +144,8 @@ consumes them yet:
 | `body.cwd`                | every body                   | resolving relative paths in effects; scoping |
 | `body.argv`               | `tool_call`                  | matching exec events' argv |
 | `body.paths`              | `tool_call`                  | matching file-open events |
-| `body.hook_ppid`          | every body                   | anchoring the agent's process tree |
+| `body.hook_ppid`          | every body                   | anchoring the agent's process tree (verified: the `claude` pid in exec form) |
+| `body.scratchpad_dir`     | every body (pending)         | attributing writes under the agent's scratch directory |
 | `body.tool_use_id`        | `tool_call` / `tool_result`  | bracketing the effect window (call ts .. result ts) |
 | `host`                    | envelope                     | remote continuity |
 | `session_id`              | envelope                     | everything |
@@ -200,18 +214,25 @@ My recommendation is C with A's writer today, but the decision is yours. The
 one thing all options share is the envelope above, so choosing later costs
 nothing before milestone 3.
 
-## 6. Open questions for you
+## 6. Open questions
 
-1. **Content policy.** `Write` and `Edit` inputs carry full file content, and
-   `Read` responses carry file contents. "Events, not content" and "record
-   everything the payload gives us" conflict here. Options: store verbatim;
-   store verbatim up to N KiB then hash and truncate with a marker; store a
-   hash only for known content fields. Storing verbatim is the simplest and
-   the most useful for undo later, but a heavy session will not stay under a
-   few MB.
-2. **`PostToolUseFailure`.** The docs list it as a separate event. Subscribing
-   gives us `ok: false` results instead of silence. I recommend yes.
-3. **`Stop` hook.** Useful turn boundary and the assistant's final text, but
-   the text can be large. Include by default, or opt-in?
-4. **Frame format**, section 5.
-5. **Genesis binding** of `session_id` into `prev`, section 4.
+Settled in ADR-0002: `PostToolUseFailure` is subscribed (`ok: false`); `Stop`
+is on by default; the writer is NDJSON (option A today, C as the plan);
+registration is exec form.
+
+Still open:
+
+1. **Content policy.** `Write` and `Edit` inputs carry full file content,
+   `Read` responses carry file contents, and, verified, `Bash` responses carry
+   `bashEditDiff` with full diffs of every file the command touched. First
+   real numbers (116 events, one working session of about 1.5 h): median
+   frame 1.5 KB, largest 49.7 KB, total 365 KB. The three largest frames were
+   two `Bash` results with `bashEditDiff` and one `PostToolBatch`. Options:
+   store verbatim; store verbatim up to N KiB then hash and truncate with a
+   marker; hash-only for known content fields. `bashEditDiff` argues for
+   verbatim: it is exactly the effect evidence Phase 2 wants, and it is
+   already computed for us.
+2. **Genesis binding** of `session_id` into `prev`, section 4. Recommended
+   yes; decide before M4 since it changes every chain.
+3. **Default registration set.** All 33 events are registered today. Drop
+   `MessageDisplay` and `PostToolBatch` from the README snippet?
