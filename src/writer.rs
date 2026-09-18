@@ -1,16 +1,23 @@
 //! The session log writer: one append-only NDJSON file per session under
 //! `$XDG_STATE_HOME/nd7/sessions/<session_id>/`.
 //!
-//! Milestone M1: no lock, no hash chain yet. `seq` is the current line count.
-//! M4 adds `flock` on `lock`, the `head` sidecar, and `prev`/`hash`.
+//! Each append happens under an advisory lock on `lock`, reads the chain head
+//! from the `head` sidecar (`<seq> <hash>`), links the new frame to it via
+//! `prev`, writes the sealed frame, then rewrites `head` atomically.
+//!
+//! Still pending: repair of a `head` that is missing or stale on an existing
+//! log, and `verify`.
 
 use std::{
-    env, fs,
+    env,
+    fmt::{self, Display},
+    fs,
     io::{self, Write},
     path::{Path, PathBuf},
+    str::FromStr,
 };
 
-use crate::hook::Event;
+use crate::hook::{Event, event::genesis_prev};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -50,7 +57,12 @@ impl SessionLog {
         self.dir.join("lock")
     }
 
-    /// Assign `seq` and append the event as one NDJSON line.
+    pub fn head_path(&self) -> PathBuf {
+        self.dir.join("head")
+    }
+
+    /// Link the event to the chain, assign `seq`, and append it as one
+    /// sealed NDJSON line.
     pub fn append(&mut self, mut event: Event) -> Result<()> {
         let lock_file = fs::OpenOptions::new()
             .create(true)
@@ -59,24 +71,69 @@ impl SessionLog {
             .open(self.lock_path())?;
         lock_file.lock()?;
 
-        event.seq = existing_lines(&self.events_path())?;
-        let mut line = serde_json::to_string(&event)?;
-        line.push('\n');
+        let (seq, prev) = match self.read_head()? {
+            Some(head) => (head.seq + 1, head.hash),
+            None => (0, genesis_prev(&self.session_id)),
+        };
+        event.seq = seq;
+        event.prev = prev;
+        let (line, hash) = event.seal();
 
         let mut f = fs::OpenOptions::new()
             .append(true)
             .create(true)
             .open(self.events_path())?;
         f.write_all(line.as_bytes())?;
+
+        // Head last, and atomically. A crash before this point leaves head one
+        // behind the log, which a later append can detect and repair; a torn
+        // head could not be told apart from a corrupt one.
+        let tmp = self.dir.join("head.tmp");
+        fs::write(&tmp, format!("{}\n", Head { seq, hash }))?;
+        fs::rename(&tmp, self.head_path())?;
         Ok(())
+    }
+
+    /// The chain head, or `None` for a session with no `head` file yet. Any
+    /// other problem propagates: an unreadable head on an existing log must
+    /// fail loudly, not restart the chain.
+    fn read_head(&self) -> Result<Option<Head>> {
+        match fs::read_to_string(self.head_path()) {
+            Ok(s) => Ok(Some(s.parse()?)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 }
 
-fn existing_lines(path: &Path) -> io::Result<u64> {
-    match fs::read(path) {
-        Ok(bytes) => Ok(bytes.iter().filter(|&&b| b == b'\n').count() as u64),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(0),
-        Err(e) => Err(e),
+/// Contents of the `head` sidecar: the last frame's `seq` and `hash`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Head {
+    pub seq: u64,
+    pub hash: String,
+}
+
+impl FromStr for Head {
+    type Err = Box<dyn std::error::Error>;
+
+    fn from_str(s: &str) -> Result<Head> {
+        let (seq, hash) = s
+            .trim_end()
+            .split_once(' ')
+            .ok_or("head: expected `<seq> <hash>`")?;
+        if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err("head: hash is not 64 hex characters".into());
+        }
+        Ok(Head {
+            seq: seq.parse()?,
+            hash: hash.to_owned(),
+        })
+    }
+}
+
+impl Display for Head {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} {}", self.seq, self.hash)
     }
 }
 
@@ -172,6 +229,47 @@ mod tests {
         let mut again = SessionLog::open_in(&root.0, "s1").unwrap();
         again.append(event("s1", "three")).unwrap();
         assert_eq!(read_seqs(&log.events_path()), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn frames_form_a_chain_anchored_to_the_session() {
+        let root = TempRoot::new();
+        let mut log = SessionLog::open_in(&root.0, "chain").unwrap();
+        for i in 0..3 {
+            log.append(event("chain", &i.to_string())).unwrap();
+        }
+        let text = fs::read_to_string(log.events_path()).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        let frames: Vec<Event> = lines
+            .iter()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+
+        assert_eq!(frames[0].prev, genesis_prev("chain"));
+        for (i, line) in lines.iter().enumerate() {
+            let (hashed, embedded) = crate::hook::event::split_sealed(line).expect("sealed");
+            assert_eq!(
+                blake3::hash(hashed.as_bytes()).to_hex().to_string(),
+                embedded,
+                "frame {i} hash"
+            );
+            assert_eq!(frames[i].hash.as_deref(), Some(embedded));
+            if i > 0 {
+                assert_eq!(frames[i].prev, frames[i - 1].hash.clone().unwrap(), "frame {i} prev");
+            }
+        }
+        let head: Head = fs::read_to_string(log.head_path()).unwrap().parse().unwrap();
+        assert_eq!(head.seq, 2);
+        assert_eq!(Some(head.hash), frames[2].hash);
+    }
+
+    #[test]
+    fn head_parses_and_prints_round_trip() {
+        let h = Head { seq: 41, hash: "ab".repeat(32) };
+        assert_eq!(format!("{h}").parse::<Head>().unwrap(), h);
+        assert!("41".parse::<Head>().is_err());
+        assert!("41 nothex".parse::<Head>().is_err());
+        assert!("x 00".parse::<Head>().is_err());
     }
 
     #[test]

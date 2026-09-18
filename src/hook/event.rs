@@ -33,14 +33,34 @@ pub struct Event {
     pub host: String,
     pub source: String,
     pub kind: Kind,
-    /// BLAKE3 of the previous frame. Filled in by the writer once hashing
-    /// lands (milestone M4); absent until then.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prev: Option<String>,
+    /// BLAKE3 hex of the previous frame's bytes. For `seq` 0 it is
+    /// [`genesis_prev`] of the session id, so a chain cannot be moved between
+    /// sessions. Set by the writer; empty until then.
+    pub prev: String,
     pub body: Body,
-    /// BLAKE3 over this frame without `hash`. Same status as `prev`.
+    /// BLAKE3 hex over this frame's bytes with this member absent. Always the
+    /// last member, which is what lets [`Event::seal`] splice it in without a
+    /// second serialization. `None` on an event being written, `Some` on a
+    /// frame read back from the log.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hash: Option<String>,
+}
+
+/// `prev` of a session's first frame: BLAKE3 of the session id.
+pub fn genesis_prev(session_id: &str) -> String {
+    blake3::hash(session_id.as_bytes()).to_hex().to_string()
+}
+
+/// Split a sealed line into the bytes that were hashed and the embedded hash.
+/// Returns `None` if the line does not end in a `hash` member.
+pub fn split_sealed(line: &str) -> Option<(String, &str)> {
+    let line = line.trim_end_matches('\n');
+    let rest = line.strip_suffix("\"}")?;
+    let (prefix, hash) = rest.rsplit_once(",\"hash\":\"")?;
+    if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some((format!("{prefix}}}"), hash))
 }
 
 /// Event kinds of Phase 1 (SCHEMA.md section 2).
@@ -164,10 +184,28 @@ impl Event {
             host: inv.host,
             source: SOURCE_CLAUDE_CODE.to_owned(),
             kind,
-            prev: None,
+            prev: String::new(),
             body,
             hash: None,
         }
+    }
+
+    /// Produce the frame line for the log and its hash, serializing once.
+    ///
+    /// The event is serialized with `hash` absent, those exact bytes are
+    /// hashed, and the hash is spliced in as the final member. `verify`
+    /// undoes the splice with [`split_sealed`] and hashes the same bytes.
+    /// Serializing an `Event` cannot fail: every field is a plain type or a
+    /// JSON value.
+    pub fn seal(&self) -> (String, String) {
+        let mut line = serde_json::to_string(self).expect("Event is always serializable");
+        debug_assert!(self.hash.is_none(), "seal() takes an unsealed event");
+        let hash = blake3::hash(line.as_bytes()).to_hex().to_string();
+        line.pop(); // the closing brace
+        line.push_str(",\"hash\":\"");
+        line.push_str(&hash);
+        line.push_str("\"}\n");
+        (line, hash)
     }
 }
 
@@ -408,11 +446,39 @@ mod tests {
         );
         assert!(line.contains(r#""kind":"prompt""#));
         assert!(line.contains(r#""text":"hi""#));
-        assert!(
-            !line.contains("prev"),
-            "prev must be absent until hashing lands"
-        );
+        assert!(!line.contains("hash"), "unsealed event has no hash member");
         let back: Event = serde_json::from_str(&line).unwrap();
         assert_eq!(back, ev);
+    }
+
+    #[test]
+    fn seal_splices_a_recomputable_hash_as_the_last_member() {
+        let mut ev = transform(&format!(
+            r#"{{{BASE}, "hook_event_name": "UserPromptSubmit", "prompt": "hi"}}"#
+        ));
+        ev.prev = genesis_prev("abc123");
+        let (line, hash) = ev.seal();
+
+        assert!(line.ends_with(&format!(",\"hash\":\"{hash}\"}}\n")));
+        assert_eq!(hash.len(), 64);
+
+        // What verify will do: cut the suffix, hash the rest, compare.
+        let (hashed, embedded) = split_sealed(&line).expect("sealed line");
+        assert_eq!(embedded, hash);
+        assert_eq!(blake3::hash(hashed.as_bytes()).to_hex().to_string(), hash);
+        // The hashed bytes are exactly the unsealed serialization.
+        assert_eq!(hashed, serde_json::to_string(&ev).unwrap());
+
+        // The line reads back as the same event plus its hash.
+        let back: Event = serde_json::from_str(&line).unwrap();
+        assert_eq!(back.hash.as_deref(), Some(hash.as_str()));
+        assert_eq!(back.prev, genesis_prev("abc123"));
+    }
+
+    #[test]
+    fn split_sealed_rejects_unsealed_or_mangled_lines() {
+        assert!(split_sealed(r#"{"v":0}"#).is_none());
+        assert!(split_sealed(r#"{"v":0,"hash":"abc"}"#).is_none());
+        assert!(split_sealed("").is_none());
     }
 }
