@@ -112,7 +112,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::hook::{HookInput, Recorder};
+    use crate::hook::{HookInput, Invocation};
 
     /// A fresh directory under the OS temp dir, removed on drop.
     struct TempRoot(PathBuf);
@@ -139,7 +139,14 @@ mod tests {
                  "hook_event_name": "UserPromptSubmit", "prompt": "{prompt}"}}"#
         );
         let input: HookInput = raw.parse().unwrap();
-        Recorder::new(1, "test".into(), 1).event(input)
+        Event::new(
+            input,
+            Invocation {
+                ts: 1,
+                host: "test".into(),
+                hook_ppid: 1,
+            },
+        )
     }
 
     fn read_seqs(path: &Path) -> Vec<u64> {

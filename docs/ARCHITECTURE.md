@@ -44,12 +44,12 @@ form (`"command": "nd7", "args": ["hook"]`) so no shell sits between Claude
 Code and the recorder. It does the following, in order, and nothing else:
 
 1. Take the invocation facts: wall-clock timestamp at nanosecond resolution,
-   hostname, parent pid (`hook::Recorder::now`). Before reading stdin, so `ts`
+   hostname, parent pid (`hook::Invocation::now`). Before reading stdin, so `ts`
    marks when the hook fired.
 2. Read stdin to EOF and parse the JSON into the typed payload model
    (`hook::HookInput`, via `FromStr`). All 33 documented events are typed;
    the payload is also kept whole.
-3. Transform into one event (`Recorder::event`). Six kinds have typed bodies;
+3. Transform into one event (`Event::new`). Six kinds have typed bodies;
    everything else, including event names this build has never seen, becomes
    a `hook` event carrying the raw payload, so an upgrade of Claude Code never
    causes silent data loss.

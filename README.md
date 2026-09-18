@@ -114,7 +114,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the layout and
 src/lib.rs            nd7_core: everything the binaries share
 src/hook/input.rs     typed model of every Claude Code hook payload (FromStr)
 src/hook/event.rs     the nd7 envelope and body
-src/hook/recorder.rs  invocation facts (ts, host, parent pid) and the transform
+src/hook/invocation.rs  invocation facts: ts, host, parent pid. Event::new joins them
 src/writer.rs         the per-session append-only log, lock included
 src/bin/nd7audit.rs   the hook binary: parse, transform, append
 tests/                multi-process concurrency test against the real binary

@@ -11,7 +11,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use super::input::{Common, HookEvent, PermissionMode};
+use super::{
+    input::{Common, HookEvent, HookInput, PermissionMode},
+    invocation::Invocation,
+};
 
 /// Schema version written into every frame. `0` while drafting.
 pub const SCHEMA_VERSION: u16 = 0;
@@ -25,7 +28,7 @@ pub struct Event {
     pub v: u16,
     pub session_id: String,
     pub seq: u64,
-    /// Unix epoch nanoseconds, UTC, taken when the recorder started.
+    /// Unix epoch nanoseconds, UTC, taken when the hook process started.
     pub ts: i64,
     pub host: String,
     pub source: String,
@@ -145,8 +148,31 @@ pub enum Detail {
     },
 }
 
+impl Event {
+    /// Transform a parsed payload plus the invocation facts into one event.
+    /// `seq`, `prev` and `hash` are left for the writer.
+    pub fn new(input: HookInput, inv: Invocation) -> Event {
+        let HookInput { common, event, raw } = input;
+        let (kind, detail) = Detail::from_hook_event(event, raw);
+        let session_id = common.session_id.clone();
+        let body = Body::new(common, Some(inv.hook_ppid), detail);
+        Event {
+            v: SCHEMA_VERSION,
+            session_id,
+            seq: 0,
+            ts: inv.ts,
+            host: inv.host,
+            source: SOURCE_CLAUDE_CODE.to_owned(),
+            kind,
+            prev: None,
+            body,
+            hash: None,
+        }
+    }
+}
+
 impl Body {
-    pub(super) fn new(common: Common, hook_ppid: Option<u32>, detail: Detail) -> Body {
+    fn new(common: Common, hook_ppid: Option<u32>, detail: Detail) -> Body {
         Body {
             cwd: common.cwd,
             transcript_path: common.transcript_path,
@@ -162,7 +188,7 @@ impl Body {
 }
 
 impl Detail {
-    pub(super) fn from_hook_event(event: HookEvent, raw: Map<String, Value>) -> (Kind, Detail) {
+    fn from_hook_event(event: HookEvent, raw: Map<String, Value>) -> (Kind, Detail) {
         match event {
             HookEvent::SessionStart(e) => (
                 Kind::SessionStart,
@@ -261,11 +287,18 @@ fn hoist_paths(input: &Value) -> Option<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hook::{HookInput, Recorder};
+    use crate::hook::{HookInput, Invocation};
 
     fn transform(raw: &str) -> Event {
         let input: HookInput = raw.parse().unwrap_or_else(|e| panic!("{e}"));
-        Recorder::new(1_700_000_000_000_000_000, "laptop".into(), 4242).event(input)
+        Event::new(
+            input,
+            Invocation {
+                ts: 1_700_000_000_000_000_000,
+                host: "laptop".into(),
+                hook_ppid: 4242,
+            },
+        )
     }
 
     const BASE: &str = r#""session_id": "abc123", "transcript_path": "/t.jsonl", "cwd": "/p", "permission_mode": "auto""#;

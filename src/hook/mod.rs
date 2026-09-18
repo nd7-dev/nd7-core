@@ -3,15 +3,15 @@
 //!
 //! - [`input`]: typed model of every Claude Code hook payload.
 //! - [`event`]: the nd7 envelope and body.
-//! - [`recorder`]: invocation-side facts (time, host, parent pid) and the
-//!   transform that produces an [`Event`].
+//! - [`invocation`]: facts about this hook invocation (time, host, parent
+//!   pid). [`Event::new`] joins them with a payload.
 //!
 //! Nothing here touches the filesystem; see [`crate::writer`] for that.
 
 pub mod event;
 pub mod input;
-pub mod recorder;
+pub mod invocation;
 
 pub use event::Event;
 pub use input::HookInput;
-pub use recorder::Recorder;
+pub use invocation::Invocation;
