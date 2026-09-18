@@ -27,8 +27,8 @@ fields. Agent-specific data never appears here; it goes in `body`.
 | `host`       | string          | yes | nd7    | Hostname (or configured host id) of the machine that produced the event. Needed for remote continuity. |
 | `source`     | string          | yes | nd7    | Producer and evidence class. Phase 1: `intent:claude-code`. Reserved: `intent:codex`, `effect:es`, `effect:fanotify`, `effect:remote`. Format is `<class>:<producer>`. |
 | `kind`       | string          | yes | nd7    | Event kind, see section 2. |
-| `prev`       | string (hex)    | yes | nd7    | BLAKE3 hash of the previous frame in this file. All-zero for `seq` 0. **Not yet written** (M4); the M1 writer omits the field. |
-| `hash`       | string (hex)    | yes | nd7    | BLAKE3 over this frame's canonical bytes with `hash` absent (section 4). **Not yet written** (M4). |
+| `prev`       | string (hex)    | yes | nd7    | BLAKE3 hash of the previous frame in this file. For `seq` 0: BLAKE3 of `session_id` (genesis binding, decided 2026-09-19). |
+| `hash`       | string (hex)    | yes | nd7    | BLAKE3 over this frame's canonical bytes with `hash` absent (section 4). Always the last member of the frame. |
 | `sig`        | string          | opt | nd7    | Reserved for a signature over `hash`. Never emitted in Phase 1. |
 | `body`       | object          | yes | mixed  | Kind-specific fields, section 2. |
 
@@ -165,7 +165,9 @@ buys hash stability across re-serializers at the cost of a dependency and a
 second serialization pass; we do not need that in Phase 1 because only `nd7`
 writes frames.
 
-Genesis: `prev` for `seq` 0 is 64 hex zeros. Consider binding `session_id`
+Genesis: `prev` for `seq` 0 is `BLAKE3(session_id)` (decided 2026-09-19), so a
+chain cannot be transplanted between sessions. Earlier draft: 64 hex zeros,
+with the note: consider binding `session_id`
 into the genesis `prev` so a chain cannot be transplanted between sessions;
 cheap, and I recommend it.
 
@@ -232,7 +234,7 @@ Still open:
    marker; hash-only for known content fields. `bashEditDiff` argues for
    verbatim: it is exactly the effect evidence Phase 2 wants, and it is
    already computed for us.
-2. **Genesis binding** of `session_id` into `prev`, section 4. Recommended
-   yes; decide before M4 since it changes every chain.
+2. ~~**Genesis binding**~~ Decided 2026-09-19: `prev` of `seq` 0 is
+   `BLAKE3(session_id)`. Section 4.
 3. **Default registration set.** All 33 events are registered today. Drop
    `MessageDisplay` and `PostToolBatch` from the README snippet?
