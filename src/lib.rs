@@ -6,9 +6,13 @@
 //!   transform between them. Pure; no I/O.
 //! - [`session_log`]: the append-only per-session log. The only module that knows
 //!   where events live on disk.
+//! - [`ship`]: `nd7 enroll` and `nd7 ship`, the machine's half of the vault
+//!   protocol: the session directory, the vault's own state, and the
+//!   network.
 //! - [`vault`]: the wire format and cryptography the machine and the vault
 //!   server share. Pure; no I/O.
 
 pub mod hook;
 pub mod session_log;
+pub mod ship;
 pub mod vault;
