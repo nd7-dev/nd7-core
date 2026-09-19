@@ -33,7 +33,9 @@ format is the contract.
   by an interrupted write, and refuses to append onto any other
   inconsistency.
 
-Not there yet: the reader (`sessions`, `show`). See
+There is no terminal reader. The log's consumers are programs: the policy
+derivation of later phases and the vault viewer. During development, `jq`
+and `tail -f` on the NDJSON file are enough. See
 [docs/PHASE-1.md](docs/PHASE-1.md).
 
 Phase 1 records **intent only**: what Claude Code said it was about to do and
@@ -113,14 +115,6 @@ A clean result proves only that the log has not been edited since its last
 frame was written by this machine; anyone with write access could still
 rewrite the whole chain.
 
-Planned commands, not yet implemented:
-
-```sh
-nd7 sessions              # list recorded sessions, newest first
-nd7 show <session-id>     # human-readable timeline
-nd7 show <session-id> --json   # raw events, one per line
-```
-
 ## Ship to a vault
 
 A local chain proves nothing against someone who can write the directory. A
@@ -183,3 +177,5 @@ the measurements behind that and behind not running a daemon.
 
 Pre-alpha. The schema is a draft and will change until it is marked `v1`.
 Frames carry `prev` and `hash`, and `nd7 verify` checks them.
+
+Licence: not yet chosen.
