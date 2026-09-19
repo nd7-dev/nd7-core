@@ -446,8 +446,10 @@ Driven by a script against a real `nd7` binary from this repo:
   vault cannot disagree about the wire format. RustCrypto crates
   (`ed25519-dalek`, `crypto_box`, `chacha20poly1305`, `blake3`) on both
   sides; the browser uses libsodium.js, which is wire-compatible.
-- Single binary, single process, SQLite for metadata, blobs on disk in a
-  directory tree keyed by chain. Postgres is a later decision.
+- Single binary, single process, no SQL. Metadata lives in an embedded
+  key-value store (redb: pure Rust, one file, ACID transactions), blobs on
+  disk in a directory tree keyed by chain. A networked store is a later
+  decision if a deployment needs one.
 - Configuration is a handful of environment variables: bind address, data
   directory, public base URL for OIDC redirects, `ND7_VAULT_DEV_LOGIN`.
   There is no master key to configure, by design.
