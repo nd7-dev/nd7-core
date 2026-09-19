@@ -3,6 +3,8 @@
 //! - `nd7 record`: read one Claude Code hook payload from stdin and append it
 //!   to the session log as one sealed event. This is what the hooks call.
 //! - `nd7 verify <session-id>`: walk that session's chain and report.
+//! - `nd7 enroll <server> <token>`: bind this machine to a vault.
+//! - `nd7 ship`: push unshipped frames to that vault.
 //!
 //! Plain blocking I/O; nothing here needs a runtime.
 //!
@@ -12,11 +14,13 @@ use std::{
     env,
     io::{self, Read},
     process::ExitCode,
+    time::Duration,
 };
 
 use nd7_core::{
     hook::{Event, HookInput, Invocation},
     session_log::{ChainError, Report, SessionLog},
+    ship,
 };
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -24,8 +28,12 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const USAGE: &str = "usage: nd7 <command>
 
 commands:
-  record                read a Claude Code hook payload from stdin, append it to the session log
-  verify <session-id>   check that a session's chain is intact";
+  record                     read a Claude Code hook payload from stdin, append it to the session log
+  verify <session-id>        check that a session's chain is intact
+  enroll <server> <token>    bind this machine to a vault; --rotate replaces its signing key
+  ship                       push unshipped frames to the vault; --every <duration> loops,
+                             --prune-after <duration> deletes fully shipped sessions.
+                             Durations are like 30s, 5m, 2h, 30d. See docs/VAULT.md.";
 
 /// What a clean verify does and does not prove. Printed with every success so
 /// nobody reads it as more than it is.
@@ -37,9 +45,7 @@ fn main() -> ExitCode {
     let mut args = env::args().skip(1);
 
     match args.next().as_deref() {
-        // `hook` is the pre-rename spelling; accepted until the settings snippet
-        // in the README has been out for a while.
-        Some("record" | "hook") => {
+        Some("record") => {
             // A hook must never block the agent: report on stderr, exit 0.
             // Claude Code treats exit 2 as a decision and other non-zero exits
             // as a hook error; neither is ours to make.
@@ -63,6 +69,47 @@ fn main() -> ExitCode {
             },
             None => {
                 eprintln!("usage: nd7 verify <session-id>");
+                ExitCode::from(2)
+            }
+        },
+        Some("enroll") => {
+            let rest: Vec<String> = args.collect();
+            let rotate = rest.iter().any(|arg| arg == "--rotate");
+            let named: Vec<&str> = rest
+                .iter()
+                .map(String::as_str)
+                .filter(|arg| *arg != "--rotate")
+                .collect();
+            match named.as_slice() {
+                [server, token] => match ship::enroll(server, token, rotate) {
+                    Ok(machine_id) => {
+                        println!("enrolled as {machine_id}");
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("nd7 enroll: {e}");
+                        ExitCode::from(1)
+                    }
+                },
+                _ => {
+                    eprintln!("usage: nd7 enroll <server> <token> [--rotate]");
+                    ExitCode::from(2)
+                }
+            }
+        }
+        Some("ship") => match ship_options(args) {
+            // The exit code is `ship`'s own; see its documentation.
+            Ok((every, prune_after)) => match ship::ship(every, prune_after) {
+                Ok(code) => ExitCode::from(code),
+                Err(e) => {
+                    eprintln!("nd7 ship: {e}");
+                    ExitCode::from(1)
+                }
+            },
+            Err(e) => {
+                eprintln!(
+                    "nd7 ship: {e}\nusage: nd7 ship [--every <duration>] [--prune-after <duration>]"
+                );
                 ExitCode::from(2)
             }
         },
@@ -95,4 +142,39 @@ fn verify(session_id: &str) -> std::result::Result<Report, ChainError> {
     SessionLog::open(session_id)
         .map_err(|e| ChainError::Io(e.to_string()))?
         .verify()
+}
+
+/// `--every` and `--prune-after`, in either order, both optional.
+fn ship_options(
+    mut args: impl Iterator<Item = String>,
+) -> Result<(Option<Duration>, Option<Duration>)> {
+    let (mut every, mut prune_after) = (None, None);
+    while let Some(arg) = args.next() {
+        let target = match arg.as_str() {
+            "--every" => &mut every,
+            "--prune-after" => &mut prune_after,
+            other => return Err(format!("unknown option `{other}`").into()),
+        };
+        let value = args.next().ok_or(format!("{arg} needs a duration"))?;
+        *target = Some(parse_duration(&value)?);
+    }
+    Ok((every, prune_after))
+}
+
+/// A whole number of seconds, minutes, hours or days: `30s`, `5m`, `2h`,
+/// `30d`. The only durations `ship` takes, and not worth a crate.
+fn parse_duration(s: &str) -> Result<Duration> {
+    let unit_at = s.len().saturating_sub(1);
+    let secs = match s.split_at_checked(unit_at) {
+        Some((count, "s")) => count.parse::<u64>().map(|n| (n, 1)),
+        Some((count, "m")) => count.parse::<u64>().map(|n| (n, 60)),
+        Some((count, "h")) => count.parse::<u64>().map(|n| (n, 60 * 60)),
+        Some((count, "d")) => count.parse::<u64>().map(|n| (n, 24 * 60 * 60)),
+        _ => return Err(format!("duration `{s}`: expected a number and s, m, h or d").into()),
+    };
+    let (count, unit) = secs.map_err(|_| format!("duration `{s}`: not a whole number"))?;
+    let seconds = count
+        .checked_mul(unit)
+        .ok_or(format!("duration `{s}`: too long"))?;
+    Ok(Duration::from_secs(seconds))
 }
