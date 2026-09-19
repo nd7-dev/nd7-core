@@ -2,8 +2,6 @@ use std::ffi::{CStr, CString, c_char, c_int};
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
-const PROFILE: &str = include_str!("./sbprofiles/claude.sb");
-
 #[link(name = "sandbox")]
 unsafe extern "C" {
     unsafe fn sandbox_init_with_parameters(
@@ -67,12 +65,4 @@ pub fn spawn_with_profile(profile: &str, program: &str, params: &[(&str, &str)])
         });
     }
     cmd
-}
-
-pub fn sandboxed(program: &str, project: &str, tmp: &str, home: &str) -> Command {
-    spawn_with_profile(
-        PROFILE,
-        program,
-        &[("PROJ", project), ("TMP", tmp), ("HOME", home)],
-    )
 }

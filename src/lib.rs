@@ -15,6 +15,7 @@
 pub mod hook;
 #[cfg(target_os = "macos")]
 pub mod sandbox;
+pub mod sbprofiles;
 pub mod session_log;
 pub mod ship;
 pub mod vault;

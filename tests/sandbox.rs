@@ -2,7 +2,7 @@
 //! These exercise the real kernel sandbox: every test spawns a program under an
 //! Apple Seatbelt profile and observes what the kernel actually allows.
 
-use nd7_core::sandbox::{sandboxed, spawn_with_profile};
+use nd7_core::{sandbox::spawn_with_profile, sbprofiles};
 use std::{
     env, fs,
     net::TcpListener,
@@ -51,7 +51,8 @@ fn permissive_profile_runs_program() {
     let tmp = canonical(&root.join("tmp"));
     let home = canonical(&root.join("home"));
 
-    let out = sandboxed("/bin/sh", &proj, &tmp, &home)
+    let params = [("PROJ", &*proj), ("TMP", &*tmp), ("HOME", &*home)];
+    let out = spawn_with_profile(sbprofiles::CLAUDE, "/bin/sh", &params)
         .args(["-c", "echo ok"])
         .output()
         .unwrap();
