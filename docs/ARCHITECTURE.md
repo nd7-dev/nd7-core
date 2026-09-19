@@ -127,12 +127,22 @@ with `source: resume` or `compact` for an existing log.
 
 ```
 $XDG_STATE_HOME/nd7/                 (default ~/.local/state/nd7)
-└── sessions/
-    └── <session_id>/
-        ├── events.ndjson            append-only event log, one frame per line
-        ├── head                     "<seq> <hash>\n", chain head for fast append
-        └── lock                     empty, flock target
+├── sessions/
+│   └── <session_id>/
+│       ├── events.ndjson            append-only event log, one frame per line
+│       ├── head                     "<seq> <hash>\n", chain head for fast append
+│       ├── lock                     empty, flock target
+│       ├── shipped                  "<seq> <hash>\n", last frame the vault acked
+│       └── chain.key                0600, present while the chain is open
+└── vault/                           only on an enrolled machine, all 0600
+    ├── machine.key                  Ed25519 seed, signs every request
+    ├── machine.id                   vault-assigned id
+    ├── server                       base URL
+    └── recipients                   pinned admin public keys, signed
 ```
+
+`shipped`, `chain.key` and the `vault` directory appear only once the
+machine has been enrolled with a vault; see "Shipping to a vault" below.
 
 `session_id` is used verbatim as the directory name. Claude Code session ids
 are UUIDs (verify: format is not documented, only shown as `abc123` in
@@ -165,6 +175,24 @@ nono uses the same location class for its audit logs.
 
 The reader is the only component that reads the log. Nothing in the hook path
 depends on it.
+
+## Shipping to a vault: `nd7 enroll`, `nd7 ship`
+
+A second reader of the log, and the only component that uses the network.
+`enroll` binds the machine to a vault: it generates an Ed25519 signing key,
+checks the vault's admin public keys against the fingerprint in the
+enrolment token, and stores the four files above. `ship` encrypts every
+frame the vault has not acknowledged, in batches of at most 8 MiB, to a
+per-chain key wrapped to those admin keys, and pushes them; the vault sees
+ciphertext, hashes and timestamps and never plaintext. It runs the same
+`verify_segment` the reader does over each batch before encrypting it, and
+stops the session rather than shipping anything that does not verify.
+
+`vault` holds the wire format and the cryptography, and is pure: no
+sockets, no files, no clock, so the server can depend on it. `ship` holds
+the filesystem and the network. Nothing in the hook path depends on either,
+and `nd7 record` never opens a socket. The contract, the algorithm and the
+acceptance tests are [VAULT.md](VAULT.md).
 
 ## Where future sources attach
 

@@ -6,7 +6,12 @@ keeps a copy of its logs. The server is a separate project, `nd7-vault`, in
 chain rules it depends on are owned here. Change it deliberately and record
 why in [DECISIONS.md](DECISIONS.md) (ADR-0005).
 
-Status: proposed. Nothing in this document is implemented.
+Status: the machine side is implemented in this repo. `nd7 enroll` and
+`nd7 ship` (§4.4, §5, §6 as a client, §7) live in `src/ship.rs` over the
+shared types in `src/vault/`, and the acceptance tests of §10 that need no
+server run against a fake vault in `tests/ship.rs`. Everything the server
+owns -- admin identity and login (§4.5), storage (§8), the viewer (§9) and
+the `nd7-vault` binary itself (§11) -- is still proposed and does not exist.
 
 ## 1. Why ship at all
 
@@ -347,7 +352,12 @@ shipped          "<seq> <hash>\n", last frame the vault acknowledged
 chain.key        the chain key, 0600, present while the chain is open
 ```
 
-Algorithm, per session directory, under the session's `lock`:
+Algorithm, per session directory. The session `lock` covers the reads of
+steps 2 and 3, the chain key when it is first written, and the `shipped`
+write of step 6. It is never held across a request: `nd7 record` waits on
+the same lock on every hook, and its budget is milliseconds. A frame
+appended while a batch is in flight is bytes past everything that was read
+under the lock, so nothing read goes stale; it ships on the next run.
 
 1. Refresh recipients (§6). Refuse to ship anything if the set changed and
    the change is not signed by a pinned key.

@@ -121,6 +121,32 @@ nd7 show <session-id>     # human-readable timeline
 nd7 show <session-id> --json   # raw events, one per line
 ```
 
+## Ship to a vault
+
+A local chain proves nothing against someone who can write the directory. A
+copy on a machine the agent cannot reach does. `nd7 enroll` binds this
+machine to a vault: it generates the signing key that authenticates every
+request, checks the vault's admin public keys against the fingerprint
+embedded in the enrolment token, and refuses to store anything if they
+disagree. Nothing is sent to a vault until that succeeds, and `nd7 record`
+never talks to the network either way.
+
+```sh
+nd7 enroll https://vault.example.com <token>   # --rotate to replace the key
+nd7 ship                     # push everything pending, exit 0 if all acked
+nd7 ship --every 30s         # loop; prefer a timer running the one-shot form
+nd7 ship --prune-after 30d   # after shipping, delete fully acked sessions
+```
+
+`nd7 ship` verifies each run of unshipped frames against the chain, then
+compresses and encrypts it, in batches of at most 8 MiB, to a per-session
+key wrapped to the admin keys pinned at enrolment. The vault stores
+ciphertext, the hashes and the timestamps; it never holds a key that opens
+them. A local rewrite makes the run exit 1 naming the frame, and a chain
+that has diverged from the vault's copy is reported and never resolved
+automatically. The protocol, the algorithm and the threat model are
+[docs/VAULT.md](docs/VAULT.md).
+
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the layout and
 [docs/SCHEMA.md](docs/SCHEMA.md) for the event format.
 
@@ -132,8 +158,10 @@ src/hook/input.rs     typed model of every Claude Code hook payload (FromStr)
 src/hook/event.rs     the nd7 envelope and body
 src/hook/invocation.rs  invocation facts: ts, host, parent pid. Event::new joins them
 src/session_log.rs    the per-session append-only log: lock, head, chain, verify
+src/vault/            wire format and cryptography shared with the vault server; pure
+src/ship.rs           `enroll` and `ship`: the session directory, the vault files, the network
 src/bin/nd7.rs        the command line; `record` is parse, transform, append
-tests/                multi-process concurrency test against the real binary
+tests/                multi-process concurrency test and a fake vault, against the real binary
 bench/                reproducible record/verify benchmark (Python, stdlib only)
 ```
 
@@ -145,6 +173,7 @@ the measurements behind that and behind not running a daemon.
 - [docs/VISION.md](docs/VISION.md): the four-phase roadmap and the open-core model.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): Phase 1 components and where future sources attach.
 - [docs/SCHEMA.md](docs/SCHEMA.md): event envelope, event kinds, frame format options.
+- [docs/VAULT.md](docs/VAULT.md): the vault protocol, its keys and its threat model.
 - [docs/BENCHMARKS.md](docs/BENCHMARKS.md): measured cost of record and verify, and how to rerun.
 - [docs/PHASE-1.md](docs/PHASE-1.md): milestone checklist.
 - [docs/DECISIONS.md](docs/DECISIONS.md): decision log.
