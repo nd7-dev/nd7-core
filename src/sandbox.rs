@@ -2,7 +2,7 @@ use std::ffi::{CStr, CString, c_char, c_int};
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
-const PROFILE: &str = include_str!("claude.sb");
+const PROFILE: &str = include_str!("./sbprofiles/claude.sb");
 
 #[link(name = "sandbox")]
 unsafe extern "C" {
@@ -37,9 +37,19 @@ fn apply(profile: &CStr, params: &[*const c_char]) -> Result<(), String> {
     Err("failed to init sandbox. Sandbox failed silently".into())
 }
 
-pub fn sandboxed(program: &str, project: &str, tmp: &str, home: &str) -> Command {
-    let profile = CString::new(PROFILE).unwrap();
-    let owned: Vec<CString> = [("PROJ", project), ("TMP", tmp), ("HOME", home)]
+/// Most `(param "NAME")` pairs a profile may take.
+const MAX_PARAMS: usize = 8;
+
+/// Like [`sandboxed`], but with caller-supplied SBPL text and parameters.
+///
+/// # Panics
+///
+/// If more than `MAX_PARAMS` parameters are given, or if any string contains
+/// an interior NULL.
+pub fn spawn_with_profile(profile: &str, program: &str, params: &[(&str, &str)]) -> Command {
+    assert!(params.len() <= MAX_PARAMS);
+    let profile = CString::new(profile).unwrap();
+    let owned: Vec<CString> = params
         .iter()
         .flat_map(|(k, v)| [CString::new(*k).unwrap(), CString::new(*v).unwrap()])
         .collect();
@@ -47,7 +57,9 @@ pub fn sandboxed(program: &str, project: &str, tmp: &str, home: &str) -> Command
     let mut cmd = Command::new(program);
     unsafe {
         cmd.pre_exec(move || {
-            let mut ptrs: [*const c_char; 7] = [std::ptr::null(); 7];
+            // Fixed-size stack array: the forked child must not allocate.
+            let mut ptrs: [*const c_char; 2 * MAX_PARAMS + 1] =
+                [std::ptr::null(); 2 * MAX_PARAMS + 1];
             for (slot, s) in ptrs.iter_mut().zip(&owned) {
                 *slot = s.as_ptr();
             }
@@ -55,4 +67,12 @@ pub fn sandboxed(program: &str, project: &str, tmp: &str, home: &str) -> Command
         });
     }
     cmd
+}
+
+pub fn sandboxed(program: &str, project: &str, tmp: &str, home: &str) -> Command {
+    spawn_with_profile(
+        PROFILE,
+        program,
+        &[("PROJ", project), ("TMP", tmp), ("HOME", home)],
+    )
 }
