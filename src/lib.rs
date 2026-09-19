@@ -4,8 +4,8 @@
 //!
 //! - [`hook`]: Claude Code hook payload types, the nd7 event model, and the
 //!   transform between them. Pure; no I/O.
-//! - [`writer`]: the append-only per-session log. The only module that knows
+//! - [`session_log`]: the append-only per-session log. The only module that knows
 //!   where events live on disk.
 
 pub mod hook;
-pub mod writer;
+pub mod session_log;

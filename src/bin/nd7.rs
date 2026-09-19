@@ -14,7 +14,7 @@ use std::{
 
 use nd7_core::{
     hook::{Event, HookInput, Invocation},
-    writer::SessionLog,
+    session_log::SessionLog,
 };
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;

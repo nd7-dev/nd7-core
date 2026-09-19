@@ -6,7 +6,7 @@
 //! - [`invocation`]: facts about this hook invocation (time, host, parent
 //!   pid). [`Event::new`] joins them with a payload.
 //!
-//! Nothing here touches the filesystem; see [`crate::writer`] for that.
+//! Nothing here touches the filesystem; see [`crate::session_log`] for that.
 
 pub mod event;
 pub mod input;
