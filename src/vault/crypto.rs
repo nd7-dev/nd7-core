@@ -407,6 +407,11 @@ impl ChainKey {
         ChainKey(key)
     }
 
+    /// The key a session directory's `chain.key` holds, read back.
+    pub fn from_bytes(key: [u8; 32]) -> ChainKey {
+        ChainKey(key)
+    }
+
     /// The raw key, for writing `chain.key` in the session directory.
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
