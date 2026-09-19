@@ -1,0 +1,6 @@
+;; Seatbelt profile applied to the claude process and everything it spawns.
+;; Permissive for now: the sandbox is in place but denies nothing. Tighten by
+;; replacing `allow default` with `deny default` and adding rules below.
+;; Parameters available via (param "NAME"): PROJ, TMP, HOME.
+(version 1)
+(allow default)
