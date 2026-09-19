@@ -82,6 +82,28 @@ impl SessionLog {
         self.dir.join("head")
     }
 
+    /// The session directory itself. `nd7 ship` keeps `shipped` and
+    /// `chain.key` beside `head` (docs/VAULT.md §7).
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// Take the exclusive advisory lock on the session's `lock` file and hold
+    /// it until the returned handle is dropped.
+    ///
+    /// Every writer of the session directory takes it: [`SessionLog::append`],
+    /// and `nd7 ship` for as long as it reads the log and rewrites `shipped`.
+    /// Creates the lock file, but not the directory; `append` creates that.
+    pub fn lock_exclusive(&self) -> io::Result<fs::File> {
+        let lock_file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.lock_path())?;
+        lock_file.lock()?;
+        Ok(lock_file)
+    }
+
     /// Link the event to the chain, assign `seq`, and append it as one
     /// sealed NDJSON line.
     ///
@@ -91,12 +113,7 @@ impl SessionLog {
     pub fn append(&mut self, mut event: Event) -> Result<()> {
         // Idempotent and cheap; the only place that may create the session.
         fs::create_dir_all(&self.dir)?;
-        let lock_file = fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(self.lock_path())?;
-        lock_file.lock()?;
+        let _lock = self.lock_exclusive()?;
 
         // Both reads happen under the exclusive lock, so no other appender can
         // move the tail between them.
@@ -272,7 +289,7 @@ impl SessionLog {
     /// The chain head, or `None` for a session with no `head` file yet. An
     /// unparseable head is a chain fault, not an I/O failure; either way it
     /// must fail loudly rather than restart the chain.
-    fn read_head(&self) -> std::result::Result<Option<Head>, ChainError> {
+    pub fn read_head(&self) -> std::result::Result<Option<Head>, ChainError> {
         match fs::read_to_string(self.head_path()) {
             Ok(s) => s
                 .parse()
@@ -280,6 +297,75 @@ impl SessionLog {
                 .map_err(|e: Box<dyn std::error::Error>| ChainError::HeadInvalid(e.to_string())),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e.into()),
+        }
+    }
+
+    /// The log's last complete frame, without its trailing newline, or
+    /// `None` for a log that is missing or empty. One frame's worth of
+    /// reading, not one log's: it reads backwards from the end.
+    pub fn last_frame(&self) -> io::Result<Option<Vec<u8>>> {
+        read_last_line(&self.events_path())
+    }
+
+    /// The bytes of every frame after the one whose `seq` is `seq`: the
+    /// pending region `nd7 ship` sends (docs/VAULT.md §7 step 3).
+    ///
+    /// Reads backwards from the end in 64 KiB chunks, the way `append` finds
+    /// the last frame, and stops at the first line whose envelope `seq` is
+    /// the one asked for. A log shipped a moment ago costs one chunk; only a
+    /// log shipped long ago is walked in full. The envelope `seq` is read
+    /// with the same byte search `append` uses, so a `"seq"` member inside a
+    /// body cannot be mistaken for a frame's own.
+    ///
+    /// `None` when no line carries that `seq`, which means the log no longer
+    /// holds the frame the caller last shipped. Bytes after the final newline
+    /// are returned with the rest, so a torn tail reaches `verify_segment`
+    /// instead of being hidden here.
+    pub fn read_after_seq(&self, seq: u64) -> io::Result<Option<Vec<u8>>> {
+        const CHUNK: u64 = 64 * 1024;
+
+        let mut file = match fs::File::open(self.events_path()) {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let len = file.seek(SeekFrom::End(0))?;
+
+        // `tail` holds the bytes from `start` to the end of the file, and the
+        // line under inspection is the one ending at `cut`.
+        let mut tail: Vec<u8> = Vec::new();
+        let mut start = len;
+        let mut cut = len;
+        loop {
+            // This line begins after the newline before `cut - 1`; the byte
+            // at `cut - 1` is this line's own terminator, so it is left out
+            // of the search. Reading more of the file is what makes the
+            // search widen.
+            let line_start = loop {
+                let searched = &tail[..cut.saturating_sub(1).saturating_sub(start) as usize];
+                if let Some(i) = searched.iter().rposition(|&b| b == b'\n') {
+                    break start + i as u64 + 1;
+                }
+                if start == 0 {
+                    break 0;
+                }
+                let chunk_start = start.saturating_sub(CHUNK);
+                let mut buf = vec![0u8; (start - chunk_start) as usize];
+                file.seek(SeekFrom::Start(chunk_start))?;
+                file.read_exact(&mut buf)?;
+                buf.append(&mut tail);
+                tail = buf;
+                start = chunk_start;
+            };
+
+            let line = &tail[(line_start - start) as usize..(cut - start) as usize];
+            if chain_fields(line).is_some_and(|(found, _)| found == seq) {
+                return Ok(Some(tail[(cut - start) as usize..].to_vec()));
+            }
+            if line_start == 0 {
+                return Ok(None);
+            }
+            cut = line_start;
         }
     }
 }
@@ -605,8 +691,9 @@ fn check_session_id(session_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// `$XDG_STATE_HOME/nd7`, default `~/.local/state/nd7`.
-fn state_root() -> Result<PathBuf> {
+/// `$XDG_STATE_HOME/nd7`, default `~/.local/state/nd7`. Shared with
+/// [`crate::ship`], which keeps the vault's files in the same root.
+pub(crate) fn state_root() -> Result<PathBuf> {
     let state_home = env::var_os("XDG_STATE_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
@@ -660,6 +747,28 @@ mod tests {
                 hook_ppid: 1,
             },
         )
+    }
+
+    #[test]
+    fn read_after_seq_finds_a_frame_several_chunks_back() {
+        // Enough frames that the log is past the 64 KiB the backwards read
+        // takes at a time, so the search crosses chunk boundaries.
+        let root = TempRoot::new();
+        let mut log = SessionLog::open_in(&root.0, "back").unwrap();
+        for i in 0..800 {
+            log.append(event("back", &format!("frame {i}"))).unwrap();
+        }
+        let bytes = fs::read(log.events_path()).unwrap();
+        assert!(bytes.len() > 4 * 64 * 1024, "{} bytes", bytes.len());
+
+        // The answer, computed the expensive way, for a frame in the first
+        // chunk read, one in the middle and the very first.
+        let lines: Vec<&[u8]> = bytes.split_inclusive(|&b| b == b'\n').collect();
+        for seq in [799, 798, 400, 1, 0] {
+            let after: Vec<u8> = lines[seq as usize + 1..].concat();
+            assert_eq!(log.read_after_seq(seq).unwrap(), Some(after), "seq {seq}");
+        }
+        assert_eq!(log.read_after_seq(800).unwrap(), None, "no such frame");
     }
 
     fn read_seqs(path: &Path) -> Vec<u64> {
