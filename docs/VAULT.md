@@ -9,9 +9,11 @@ why in [DECISIONS.md](DECISIONS.md) (ADR-0005).
 Status: the machine side is implemented in this repo. `nd7 enroll` and
 `nd7 ship` (§4.4, §5, §6 as a client, §7) live in `src/ship.rs` over the
 shared types in `src/vault/`, and the acceptance tests of §10 that need no
-server run against a fake vault in `tests/ship.rs`. Everything the server
-owns -- admin identity and login (§4.5), storage (§8), the viewer (§9) and
-the `nd7-vault` binary itself (§11) -- is still proposed and does not exist.
+server run against a fake vault in `tests/ship.rs`. In `../nd7-vault`, the
+server (§5, §6, §8), admin identity and login (§4.5) and the browser viewer
+(§9) are implemented. The admin CLI of §3 and §4.3 is being written now.
+The §10 acceptance run end to end, against a real vault and a real `nd7`,
+has not happened yet.
 
 ## 1. Why ship at all
 
