@@ -5,6 +5,8 @@
 //! - `nd7 verify <session-id>`: walk that session's chain and report.
 //! - `nd7 enroll <server> <token>`: bind this machine to a vault.
 //! - `nd7 ship`: push unshipped frames to that vault.
+//! - `nd7 run [--profile <file>] <program> [args...]`: run a program under a
+//!   Seatbelt profile. macOS only.
 //!
 //! Plain blocking I/O; nothing here needs a runtime.
 //!
@@ -33,7 +35,9 @@ commands:
   enroll <server> <token>    bind this machine to a vault; --rotate replaces its signing key
   ship                       push unshipped frames to the vault; --every <duration> loops,
                              --prune-after <duration> deletes fully shipped sessions.
-                             Durations are like 30s, 5m, 2h, 30d. See docs/VAULT.md.";
+                             Durations are like 30s, 5m, 2h, 30d. See docs/VAULT.md.
+  run <program> [args...]    run a program under a Seatbelt profile; --profile <file>
+                             uses that profile instead of the built-in one";
 
 /// What a clean verify does and does not prove. Printed with every success so
 /// nobody reads it as more than it is.
@@ -113,6 +117,7 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         },
+        Some("run") => run(args),
         Some("-h" | "--help") => {
             println!("{USAGE}");
             ExitCode::SUCCESS
@@ -142,6 +147,79 @@ fn verify(session_id: &str) -> std::result::Result<Report, ChainError> {
     SessionLog::open(session_id)
         .map_err(|e| ChainError::Io(e.to_string()))?
         .verify()
+}
+
+/// `nd7 run [--profile <file>] <program> [args...]`: the program runs under a
+/// Seatbelt profile, with this process's stdin, stdout and stderr, and its exit
+/// code becomes ours.
+#[cfg(target_os = "macos")]
+fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
+    use std::{os::unix::process::ExitStatusExt, path::PathBuf, process::ExitStatus};
+
+    /// Seatbelt takes its parameters as strings, so a path that is not UTF-8
+    /// cannot be one.
+    fn param(path: PathBuf) -> Result<String> {
+        path.into_os_string()
+            .into_string()
+            .map_err(|path| format!("path is not UTF-8: {path:?}").into())
+    }
+
+    fn spawn(
+        profile: Option<String>,
+        program: &str,
+        args: impl Iterator<Item = String>,
+    ) -> Result<ExitStatus> {
+        let profile = match profile {
+            Some(path) => std::fs::read_to_string(path)?,
+            None => nd7_core::sbprofiles::CLAUDE.to_owned(),
+        };
+        // `subpath` matches resolved paths, so the parameters are canonical.
+        let proj = param(env::current_dir()?.canonicalize()?)?;
+        let tmp = param(env::temp_dir().canonicalize()?)?;
+        let home = env::var("HOME")?;
+        let params = [("PROJ", &*proj), ("TMP", &*tmp), ("HOME", &*home)];
+        Ok(
+            nd7_core::sandbox::spawn_with_profile(&profile, program, &params)
+                .args(args)
+                .status()?,
+        )
+    }
+
+    // `--profile` is ours only before the program: from the program on, every
+    // argument is the child's, including the ones that look like options.
+    let (mut profile, mut program) = (None, None);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--profile" => profile = args.next(),
+            _ => {
+                program = Some(arg);
+                break;
+            }
+        }
+    }
+    let Some(program) = program else {
+        eprintln!("usage: nd7 run [--profile <file>] <program> [args...]");
+        return ExitCode::from(2);
+    };
+
+    match spawn(profile, &program, args) {
+        // No code means a signal killed it; report it as a shell would.
+        Ok(status) => ExitCode::from(
+            status
+                .code()
+                .unwrap_or_else(|| 128 + status.signal().unwrap_or(0)) as u8,
+        ),
+        Err(e) => {
+            eprintln!("nd7 run: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn run(_args: impl Iterator<Item = String>) -> ExitCode {
+    eprintln!("nd7 run: only supported on macOS");
+    ExitCode::from(2)
 }
 
 /// `--every` and `--prune-after`, in either order, both optional.

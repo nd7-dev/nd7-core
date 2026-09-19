@@ -38,7 +38,9 @@ fn apply(profile: &CStr, params: &[*const c_char]) -> Result<(), String> {
 /// Most `(param "NAME")` pairs a profile may take.
 const MAX_PARAMS: usize = 8;
 
-/// Like [`sandboxed`], but with caller-supplied SBPL text and parameters.
+/// A [`Command`] that applies the SBPL `profile` to itself between fork and
+/// exec, so `program` and everything it spawns run inside it. `params` fill
+/// the profile's `(param "NAME")` references.
 ///
 /// # Panics
 ///
