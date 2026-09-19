@@ -1,0 +1,36 @@
+{
+  "frames": [
+    {
+      "frame": "{\"v\":0,\"session_id\":\"3f2d1c48-9b7a-4e51-8c6d-0a1b2c3d4e5f\",\"seq\":0,\"ts\":1758240000000000000,\"host\":\"vectors.example\",\"source\":\"intent:claude-code\",\"kind\":\"session_start\",\"prev\":\"305c9ae9d25b4b1fd06fef9f3862756a1dd14b3927fca448e726c2e37d5d5336\",\"body\":{\"cwd\":\"/Users/dev/code/nd7-core\",\"transcript_path\":\"/Users/dev/.claude/projects/-Users-dev-code-nd7-core/3f2d1c48.jsonl\",\"hook_event_name\":\"SessionStart\",\"hook_ppid\":4242,\"reason\":\"startup\"},\"hash\":\"03efba11a9e39d66d4c105dd511186590d69c95c9c2cc3c3d6d4044ce1816399\"}\n",
+      "hash": "03efba11a9e39d66d4c105dd511186590d69c95c9c2cc3c3d6d4044ce1816399",
+      "prev": "305c9ae9d25b4b1fd06fef9f3862756a1dd14b3927fca448e726c2e37d5d5336",
+      "seq": 0
+    },
+    {
+      "frame": "{\"v\":0,\"session_id\":\"3f2d1c48-9b7a-4e51-8c6d-0a1b2c3d4e5f\",\"seq\":1,\"ts\":1758240001000000000,\"host\":\"vectors.example\",\"source\":\"intent:claude-code\",\"kind\":\"prompt\",\"prev\":\"03efba11a9e39d66d4c105dd511186590d69c95c9c2cc3c3d6d4044ce1816399\",\"body\":{\"cwd\":\"/Users/dev/code/nd7-core\",\"transcript_path\":\"/Users/dev/.claude/projects/-Users-dev-code-nd7-core/3f2d1c48.jsonl\",\"hook_event_name\":\"UserPromptSubmit\",\"permission_mode\":\"default\",\"prompt_id\":\"550e8400-e29b-41d4-a716-446655440000\",\"hook_ppid\":4242,\"text\":\"Run the tests and tell me what breaks.\"},\"hash\":\"46c96325ca27884022db5e763df368051414a06d095a6549c86e10d9a4980f51\"}\n",
+      "hash": "46c96325ca27884022db5e763df368051414a06d095a6549c86e10d9a4980f51",
+      "prev": "03efba11a9e39d66d4c105dd511186590d69c95c9c2cc3c3d6d4044ce1816399",
+      "seq": 1
+    },
+    {
+      "frame": "{\"v\":0,\"session_id\":\"3f2d1c48-9b7a-4e51-8c6d-0a1b2c3d4e5f\",\"seq\":2,\"ts\":1758240002000000000,\"host\":\"vectors.example\",\"source\":\"intent:claude-code\",\"kind\":\"tool_call\",\"prev\":\"46c96325ca27884022db5e763df368051414a06d095a6549c86e10d9a4980f51\",\"body\":{\"cwd\":\"/Users/dev/code/nd7-core\",\"transcript_path\":\"/Users/dev/.claude/projects/-Users-dev-code-nd7-core/3f2d1c48.jsonl\",\"hook_event_name\":\"PreToolUse\",\"permission_mode\":\"default\",\"prompt_id\":\"550e8400-e29b-41d4-a716-446655440000\",\"hook_ppid\":4242,\"tool_use_id\":\"toolu_01VpVectorBashCall\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"cargo test --quiet\",\"description\":\"Run the test suite\",\"timeout\":120000},\"argv\":\"cargo test --quiet\"},\"hash\":\"55e62bf2a7dd6a89af81788bf61508cc5bf62bdb01f45a16d8f3ffa2fba7a394\"}\n",
+      "hash": "55e62bf2a7dd6a89af81788bf61508cc5bf62bdb01f45a16d8f3ffa2fba7a394",
+      "prev": "46c96325ca27884022db5e763df368051414a06d095a6549c86e10d9a4980f51",
+      "seq": 2
+    },
+    {
+      "frame": "{\"v\":0,\"session_id\":\"3f2d1c48-9b7a-4e51-8c6d-0a1b2c3d4e5f\",\"seq\":3,\"ts\":1758240003000000000,\"host\":\"vectors.example\",\"source\":\"intent:claude-code\",\"kind\":\"tool_result\",\"prev\":\"55e62bf2a7dd6a89af81788bf61508cc5bf62bdb01f45a16d8f3ffa2fba7a394\",\"body\":{\"cwd\":\"/Users/dev/code/nd7-core\",\"transcript_path\":\"/Users/dev/.claude/projects/-Users-dev-code-nd7-core/3f2d1c48.jsonl\",\"hook_event_name\":\"PostToolUse\",\"permission_mode\":\"default\",\"prompt_id\":\"550e8400-e29b-41d4-a716-446655440000\",\"hook_ppid\":4242,\"tool_use_id\":\"toolu_01VpVectorBashCall\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"cargo test --quiet\",\"description\":\"Run the test suite\",\"timeout\":120000},\"tool_response\":{\"interrupted\":false,\"isImage\":false,\"stderr\":\"\",\"stdout\":\"running 24 tests\\n........................\\ntest result: ok. 24 passed; 0 failed\\n\"},\"ok\":true,\"duration_ms\":4187},\"hash\":\"0ccf8e713cdd808507ec5779f2355939a5a2eceafd8f465a3e488f7e4e72b8b6\"}\n",
+      "hash": "0ccf8e713cdd808507ec5779f2355939a5a2eceafd8f465a3e488f7e4e72b8b6",
+      "prev": "55e62bf2a7dd6a89af81788bf61508cc5bf62bdb01f45a16d8f3ffa2fba7a394",
+      "seq": 3
+    },
+    {
+      "frame": "{\"v\":0,\"session_id\":\"3f2d1c48-9b7a-4e51-8c6d-0a1b2c3d4e5f\",\"seq\":4,\"ts\":1758240004000000000,\"host\":\"vectors.example\",\"source\":\"intent:claude-code\",\"kind\":\"session_end\",\"prev\":\"0ccf8e713cdd808507ec5779f2355939a5a2eceafd8f465a3e488f7e4e72b8b6\",\"body\":{\"cwd\":\"/Users/dev/code/nd7-core\",\"transcript_path\":\"/Users/dev/.claude/projects/-Users-dev-code-nd7-core/3f2d1c48.jsonl\",\"hook_event_name\":\"SessionEnd\",\"hook_ppid\":4242,\"reason\":\"prompt_input_exit\"},\"hash\":\"361205334258194406ec9c8f1db3e716fadfa6780fa249b8819f89248180e155\"}\n",
+      "hash": "361205334258194406ec9c8f1db3e716fadfa6780fa249b8819f89248180e155",
+      "prev": "0ccf8e713cdd808507ec5779f2355939a5a2eceafd8f465a3e488f7e4e72b8b6",
+      "seq": 4
+    }
+  ],
+  "genesis_prev": "305c9ae9d25b4b1fd06fef9f3862756a1dd14b3927fca448e726c2e37d5d5336",
+  "session_id": "3f2d1c48-9b7a-4e51-8c6d-0a1b2c3d4e5f"
+}

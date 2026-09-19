@@ -27,6 +27,8 @@ use std::{
     str::FromStr,
 };
 
+use serde::{Deserialize, Serialize};
+
 use crate::hook::{
     Event,
     event::{genesis_prev, hash_sealed_prefix, split_sealed},
@@ -136,12 +138,10 @@ impl SessionLog {
 
     /// Walk the log from the first frame and check the chain.
     ///
-    /// For every line, in this order: it is a sealed frame (`split_sealed`),
-    /// its embedded `hash` equals BLAKE3 of the bytes before the splice, its
-    /// `seq` is the next expected one, and its `prev` equals the previous
-    /// frame's hash (or `genesis_prev(session_id)` at seq 0). Then the tail is
-    /// compared with `head`. Stops at the first failure. Takes a shared lock so
-    /// a concurrent `append` cannot make the tail and `head` disagree mid-walk.
+    /// The walk itself is [`verify_segment`] over the whole file from genesis;
+    /// this adds what only a session directory has, the comparison of the last
+    /// frame with `head`. Stops at the first failure. Takes a shared lock so a
+    /// concurrent `append` cannot make the tail and `head` disagree mid-walk.
     ///
     /// An empty or missing log verifies with zero frames. What a clean result
     /// proves: the file is unchanged since its last frame was written, if
@@ -185,26 +185,9 @@ impl SessionLog {
             };
         }
 
-        // Checked before the walk: a frame cut short still hashes cleanly,
-        // since the hash never covered the trailing newline.
-        if !bytes.ends_with(b"\n") {
-            let complete = bytes.iter().filter(|&&b| b == b'\n').count() as u64;
-            return Err(ChainError::TornTail { seq: complete });
-        }
-
-        // Nothing is copied out of `bytes` in this loop: `expected_prev` is the
-        // previous line's hash, borrowed from the buffer, and the only String
-        // built is the one the `Report` hands back.
-        let genesis = genesis_prev(&self.session_id);
-        let mut expected_prev: &str = &genesis;
-        let mut frames = 0u64;
-        for (i, line) in bytes[..bytes.len() - 1].split(|&b| b == b'\n').enumerate() {
-            expected_prev = check_frame(i as u64, line, expected_prev)?;
-            frames += 1;
-        }
-        let last_hash = expected_prev;
-
-        let last_seq = frames - 1;
+        let tail = verify_segment(&self.session_id, None, &bytes)?;
+        let last_seq = tail.seq;
+        let frames = last_seq + 1;
         match self.read_head()? {
             None => Err(ChainError::HeadMissing { last_seq }),
             Some(head) if head.seq < last_seq => Err(ChainError::HeadStale {
@@ -215,10 +198,10 @@ impl SessionLog {
                 head_seq: head.seq,
                 last_seq,
             }),
-            Some(head) if head.hash != last_hash => Err(ChainError::HeadMismatch { seq: last_seq }),
+            Some(head) if head.hash != tail.hash => Err(ChainError::HeadMismatch { seq: last_seq }),
             Some(_) => Ok(Report {
                 frames,
-                last_hash: Some(last_hash.to_owned()),
+                last_hash: Some(tail.hash),
             }),
         }
     }
@@ -299,6 +282,65 @@ impl SessionLog {
             Err(e) => Err(e.into()),
         }
     }
+}
+
+/// Verify one contiguous run of newline-terminated sealed frames claimed to
+/// follow `after`, and return the head it ends at.
+///
+/// `after` is the frame before the run, or `None` at genesis, where the first
+/// frame must have `seq` 0 and `prev` equal to `genesis_prev(session_id)`.
+/// Each frame is checked in the order `check_frame` runs: it is a sealed
+/// frame, its embedded `hash` equals BLAKE3 of the bytes before the splice,
+/// its `seq` is the next expected one, and its `prev` is the hash of the frame
+/// before it. Stops at the first failure. Bytes after the last newline are a
+/// frame cut short, [`ChainError::TornTail`].
+///
+/// The rule lives here, away from any file, because the same run of frames is
+/// checked in three places: by [`SessionLog::verify`] over a whole log, by
+/// `nd7 ship` over a batch before it is encrypted, and by the admin over a
+/// batch decrypted again (docs/VAULT.md section 6).
+///
+/// An empty run continues from `after` and returns it unchanged. An empty run
+/// at genesis has no frame 0 and therefore no head to return, which is
+/// reported as [`ChainError::Unsealed`] at seq 0.
+pub fn verify_segment(
+    session_id: &str,
+    after: Option<&Head>,
+    frames: &[u8],
+) -> std::result::Result<Head, ChainError> {
+    if frames.is_empty() {
+        return after.cloned().ok_or(ChainError::Unsealed { seq: 0 });
+    }
+
+    let (first_seq, first_prev) = match after {
+        Some(head) => (head.seq + 1, head.hash.clone()),
+        None => (0, genesis_prev(session_id)),
+    };
+
+    // Checked before the walk: a frame cut short still hashes cleanly, since
+    // the hash never covered the trailing newline.
+    if !frames.ends_with(b"\n") {
+        let complete = frames.iter().filter(|&&b| b == b'\n').count() as u64;
+        return Err(ChainError::TornTail {
+            seq: first_seq + complete,
+        });
+    }
+
+    // Nothing is copied out of `frames` in this loop: `expected_prev` is the
+    // previous line's hash, borrowed from the buffer, and the only String
+    // built is the one the `Head` hands back.
+    let mut expected_prev: &str = &first_prev;
+    let mut seq = first_seq;
+    for line in frames[..frames.len() - 1].split(|&b| b == b'\n') {
+        expected_prev = check_frame(seq, line, expected_prev)?;
+        seq += 1;
+    }
+    // The loop ran at least once: bytes that are not empty and end in a
+    // newline hold at least one line.
+    Ok(Head {
+        seq: seq - 1,
+        hash: expected_prev.to_owned(),
+    })
 }
 
 /// The last complete line of `path`, without its trailing newline.
@@ -518,8 +560,9 @@ impl From<io::Error> for ChainError {
     }
 }
 
-/// Contents of the `head` sidecar: the last frame's `seq` and `hash`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Contents of the `head` sidecar: the last frame's `seq` and `hash`. Also
+/// what a chain's holder and the vault exchange about it, so it serializes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Head {
     pub seq: u64,
     pub hash: String,
@@ -942,6 +985,20 @@ mod tests {
                 frames: 0,
                 last_hash: None
             }
+        );
+    }
+
+    #[test]
+    fn verify_segment_of_no_frames_ends_where_it_started() {
+        let head = Head {
+            seq: 7,
+            hash: "ab".repeat(32),
+        };
+        assert_eq!(verify_segment("s", Some(&head), b""), Ok(head.clone()));
+        // At genesis there is no frame 0, and so no head to hand back.
+        assert_eq!(
+            verify_segment("s", None, b""),
+            Err(ChainError::Unsealed { seq: 0 })
         );
     }
 
