@@ -134,6 +134,7 @@ src/hook/invocation.rs  invocation facts: ts, host, parent pid. Event::new joins
 src/session_log.rs    the per-session append-only log: lock, head, chain, verify
 src/bin/nd7.rs        the command line; `record` is parse, transform, append
 tests/                multi-process concurrency test against the real binary
+bench/                reproducible record/verify benchmark (Python, stdlib only)
 ```
 
 The hook path is plain blocking I/O with no async runtime; see ADR-0003 for
@@ -144,6 +145,7 @@ the measurements behind that and behind not running a daemon.
 - [docs/VISION.md](docs/VISION.md): the four-phase roadmap and the open-core model.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): Phase 1 components and where future sources attach.
 - [docs/SCHEMA.md](docs/SCHEMA.md): event envelope, event kinds, frame format options.
+- [docs/BENCHMARKS.md](docs/BENCHMARKS.md): measured cost of record and verify, and how to rerun.
 - [docs/PHASE-1.md](docs/PHASE-1.md): milestone checklist.
 - [docs/DECISIONS.md](docs/DECISIONS.md): decision log.
 - [docs/COMPETITIVE-NOTES.md](docs/COMPETITIVE-NOTES.md): comparison with nono.

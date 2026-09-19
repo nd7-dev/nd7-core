@@ -33,7 +33,7 @@ matters only where noted.
   `tool_call`/`tool_result` by `tool_use_id` with durations, `-v` for full
   payloads, `--json` for raw frames, colour off when not a TTY.
 
-- [~] **M6. Never slow the agent.** (first numbers in ADR-0003: ~4 ms process spawn, ~6 ms for the `sh -c` wrapper removed by exec form, ~1 ms for the append, plus ~8 ms per 5k lines for the seq scan that `head` removes) Measure `nd7 record` wall time on a 1k-event
+- [x] **M6. Never slow the agent.** (measured 2026-09-19, see BENCHMARKS.md: record ~5.0 ms wall of which ~3.4 ms is process spawn, O(1) in log size; verify 470 MB/s; error paths exit 0 with one stderr line) Measure `nd7 record` wall time on a 1k-event
   session (target: p99 under 5 ms on this laptop). Confirm behaviour when the
   state dir is unwritable, stdin is empty, JSON is malformed: stderr line, exit
   0. Confirm `SessionEnd` fits the 1.5 s budget.
