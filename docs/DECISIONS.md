@@ -239,3 +239,47 @@ no passwords are stored. The full contract is [VAULT.md](VAULT.md).
   keys, few admins, and rekeying on suspicion.
 - `ts` is readable on the vault; revisit if working-hours metadata is
   itself sensitive for a deployment.
+
+## ADR-0006: Store frame content verbatim, and leave two events unregistered
+
+- Date: 2026-09-19
+- Status: accepted
+
+### Context
+SCHEMA.md §6.1 left the content policy open: `Write` and `Edit` inputs carry
+whole files, `Read` responses carry file contents, and `Bash` responses carry
+`bashEditDiff`, a full diff of every file the command touched. The options
+were verbatim, verbatim up to N KiB then hash and truncate, or hash-only for
+known content fields. M7 supplied the numbers. A 116-event session of about
+1.5 hours came to 365 KB, median frame 1.5 KB, largest 49.7 KB; the largest
+session recorded since is 1487 frames over about ten hours and 4.8 MB
+uncompressed, of which 702 frames were `MessageDisplay` or `PostToolBatch`.
+
+### Decision
+Store content verbatim. Drop `MessageDisplay` and `PostToolBatch` from the
+default registration set in the README; both remain recordable by anyone who
+adds them, and both still land as `kind: hook` if they do.
+
+### Alternatives considered
+- **Truncate above a threshold and store a hash.** The data says there is
+  nothing to buy: megabytes per working day is not a problem worth a lossy
+  log. It would also throw away `bashEditDiff`, which is the closest thing
+  Phase 1 has to effect evidence and is already computed for us.
+- **Hash-only for known content fields.** Same loss, and it makes every
+  reader ask the filesystem for bytes that may already have changed, which
+  is exactly the question the log exists to answer.
+- **Keep all 33 events registered.** `MessageDisplay` is streamed assistant
+  text and `PostToolBatch` repeats every tool response of a batch that
+  `PostToolUse` already recorded. Neither carries anything a sandbox or an
+  undo needs, and together they were 702 of 1487 frames.
+
+### Consequences
+- Frames hold secrets the agent read, in the clear, on disk. That is the
+  premise the vault is designed around (ADR-0005, VAULT.md §2) and it is why
+  frames are encrypted on the machine before they ship.
+- Sessions are roughly halved by the registration change, which moves the
+  ship and prune costs of VAULT.md §7 in the same direction.
+- SCHEMA.md §6 questions 1 and 3 are closed; §6.2 was already decided.
+- Must revisit if a single session's log grows past what a machine should
+  hold, or if a producer other than Claude Code emits content of a different
+  order of magnitude.
