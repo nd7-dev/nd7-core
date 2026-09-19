@@ -160,3 +160,35 @@ seq scan with the `head` sidecar (M4) rather than with a resident process.
   and direct-write fallback fits behind it when the Phase 2 collector arrives.
 - Must revisit: after `head` lands, remeasure against the 5 ms p99 target.
 
+## ADR-0004: One binary, `nd7`, with `record` as the hook command
+
+- Date: 2026-09-19
+- Status: accepted; refines the naming in ADR-0002 and ADR-0003
+
+### Context
+ADR-0003 introduced a library plus thin binaries and named the first binary
+`nd7audit`, installed on `PATH` as `nd7` through a symlink, with `hook` as
+its only subcommand. Once `verify`, `sessions` and `show` were in sight it
+was clear there is one user-facing tool, not several, and that `hook`
+described how Claude Code calls us rather than what we do.
+
+### Decision
+The binary is `nd7`. Its subcommands are verbs: `record` (what hooks call),
+`verify`, `sessions`, `show`. `hook` remains an accepted alias of `record`
+until M8. Other kinds of program that arrive later, such as the Phase 2
+collector daemon, get their own names (`nd7d` or `nd7-collector`) rather
+than becoming faces of the CLI.
+
+### Alternatives considered
+- Keep `nd7audit` and the symlink: one more install step and a name that
+  does not match what users type.
+- Keep `hook` as the command: accurate for Claude Code, wrong for the Codex
+  and collector producers that will feed the same writer.
+
+### Consequences
+- `cargo install --path .` yields `nd7` directly; the README loses the
+  symlink step.
+- `nd7 record` always exits 0, reporting failures on stderr, as the
+  architecture requires; unknown commands exit 2 with usage.
+- ADR-0002 and ADR-0003 keep their original wording per this log's rule.
+
