@@ -192,3 +192,50 @@ than becoming faces of the CLI.
   architecture requires; unknown commands exit 2 with usage.
 - ADR-0002 and ADR-0003 keep their original wording per this log's rule.
 
+
+---
+
+## ADR-0005: Ship logs to a vault the machine encrypts for, not the vault
+
+- Date: 2026-09-19
+- Status: proposed
+
+### Context
+The hash chain proves a log is unchanged only if the verifier trusts the
+head; whoever can write the file can rewrite the chain. A prompt copy on a
+server the agent cannot reach turns the chain into evidence. The frames hold
+everything the agent saw, including secrets, so a stolen server or a
+compromised operator must yield nothing readable, and a single leaked key
+must not expose more than one organisation.
+
+### Decision
+`nd7 ship` batches unshipped frames per session, verifies them locally,
+compresses, and encrypts each batch with a per-chain key wrapped to the
+public keys of the organisation's admins. The server, `nd7-vault`
+(separate repo), stores ciphertext plus a clear index of `seq`, `prev`,
+`hash`, `ts`, verifies chain linkage only, and never holds a decryption key.
+Machines authenticate with a per-machine Ed25519 key that signs every
+request over HTTPS. Admins log in through pluggable providers (OIDC first);
+no passwords are stored. The full contract is [VAULT.md](VAULT.md).
+
+### Alternatives considered
+- Server-side encryption under a vault master key: one key opens
+  everything; a dumped database plus that key is total loss.
+- Per-organisation key held by the server: still readable by the operator
+  and by anyone with the database and the key file.
+- One request per frame: hundreds of round trips per session for no gain;
+  frames stay the addressable unit, batches the transfer unit.
+- Shipping from inside the hook: network in a path budgeted in milliseconds.
+- Password login with Argon2id: another secret to protect and the wrong
+  shape for organisations that already have an identity provider.
+
+### Consequences
+- The vault cannot check that a frame's bytes hash to its `hash`; only the
+  machine (before shipping) and the admin (after decrypting) can. Linkage
+  checks on the index still catch every local rewrite on the next push.
+- This repo grows a `vault` module with the batch format, crypto and
+  request signing, so the machine and the server share one definition.
+- Admin keys open a whole organisation; the mitigations are hardware-backed
+  keys, few admins, and rekeying on suspicion.
+- `ts` is readable on the vault; revisit if working-hours metadata is
+  itself sensitive for a deployment.
