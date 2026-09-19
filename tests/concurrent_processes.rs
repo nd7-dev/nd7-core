@@ -1,4 +1,4 @@
-//! The honest concurrency test: many `nd7audit` processes appending to one
+//! The honest concurrency test: many `nd7 record` processes appending to one
 //! session at the same time, the way Claude Code fires hooks for parallel tool
 //! calls. Exercises the real `flock` across process boundaries.
 
@@ -27,8 +27,8 @@ fn parallel_hook_processes_get_dense_unique_seqs() {
     // Spawn all first so they overlap, then feed stdin and wait.
     let mut children: Vec<_> = (0..N)
         .map(|_| {
-            Command::new(env!("CARGO_BIN_EXE_nd7audit"))
-                .arg("hook")
+            Command::new(env!("CARGO_BIN_EXE_nd7"))
+                .arg("record")
                 .env("XDG_STATE_HOME", &root)
                 .stdin(Stdio::piped())
                 .stderr(Stdio::piped())

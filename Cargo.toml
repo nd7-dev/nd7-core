@@ -10,8 +10,8 @@ name = "nd7_core"
 path = "src/lib.rs"
 
 [[bin]]
-name = "nd7audit"
-path = "src/bin/nd7audit.rs"
+name = "nd7"
+path = "src/bin/nd7.rs"
 
 [dependencies]
 blake3 = "1.8.7"
