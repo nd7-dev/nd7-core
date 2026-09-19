@@ -216,6 +216,34 @@ impl AdminKey {
         }
     }
 
+    /// Sign one request as this admin, returning the `X-Nd7-Signature`
+    /// value (§4.5).
+    ///
+    /// Exactly [`MachineKey::sign_request`]: the same five fields in the
+    /// same layout, over the same private function, with the admin's
+    /// Ed25519 half in place of the machine's key and the admin's key
+    /// fingerprint -- the `X-Nd7-Admin` value -- in place of the machine
+    /// id. The vault verifies it with [`verify_request`] against the
+    /// Ed25519 half of the [`AdminPublic`] it has stored, and so cannot
+    /// tell the two signers apart except by which header named them.
+    pub fn sign_request(
+        &self,
+        method: &str,
+        path: &str,
+        admin_fingerprint: &str,
+        timestamp_secs: i64,
+        body_hash_hex: &str,
+    ) -> String {
+        let msg = request_bytes(
+            method,
+            path,
+            admin_fingerprint,
+            timestamp_secs,
+            body_hash_hex,
+        );
+        B64.encode(self.ed25519.sign(msg.as_bytes()).to_bytes())
+    }
+
     /// Open a chain key wrapped by [`ChainKey::wrap_for`] to this admin.
     pub fn unwrap(&self, wrapped: &str) -> Result<ChainKey, CryptoError> {
         let sealed = B64.decode(wrapped).map_err(|_| CryptoError::Encoding)?;
@@ -671,6 +699,35 @@ mod tests {
                 .public_key()
                 .to_bytes()
         );
+    }
+
+    #[test]
+    fn an_admin_signs_a_request_exactly_as_a_machine_does() {
+        let seed = [23u8; 32];
+        let admin = AdminKey::from_seed(&seed);
+        let hash = body_hash();
+        let fingerprint = admin.public().fingerprint();
+
+        let signature = admin.sign_request("GET", "/api/me", &fingerprint, 1_700_000_000, &hash);
+        assert_eq!(
+            signature,
+            MachineKey::from_seed(&seed).sign_request(
+                "GET",
+                "/api/me",
+                &fingerprint,
+                1_700_000_000,
+                &hash
+            )
+        );
+        assert!(verify_request(
+            &admin.public().ed25519,
+            "GET",
+            "/api/me",
+            &fingerprint,
+            1_700_000_000,
+            &hash,
+            &signature
+        ));
     }
 
     #[test]
