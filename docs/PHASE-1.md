@@ -7,7 +7,7 @@ matters only where noted.
   [SCHEMA.md](SCHEMA.md) §5–6, record them in DECISIONS.md, mark the schema
   `v0`. No code.
 
-- [x] **M1. One event in, one event out.** (2026-09-18; `nd7 show` pending, see M5) `cargo new nd7`. `nd7 hook` reads
+- [x] **M1. One event in, one event out.** (2026-09-18; `nd7 show` pending, see M5) `cargo new nd7`. `nd7 record` reads
   stdin, parses the common hook fields plus `hook_event_name`, builds an
   envelope with `seq`, `ts`, `source`, `kind`, appends one NDJSON line to
   `$XDG_STATE_HOME/nd7/sessions/<id>/events.ndjson`. `nd7 show <id>` prints
@@ -33,7 +33,7 @@ matters only where noted.
   `tool_call`/`tool_result` by `tool_use_id` with durations, `-v` for full
   payloads, `--json` for raw frames, colour off when not a TTY.
 
-- [~] **M6. Never slow the agent.** (first numbers in ADR-0003: ~4 ms process spawn, ~6 ms for the `sh -c` wrapper removed by exec form, ~1 ms for the append, plus ~8 ms per 5k lines for the seq scan that `head` removes) Measure `nd7 hook` wall time on a 1k-event
+- [~] **M6. Never slow the agent.** (first numbers in ADR-0003: ~4 ms process spawn, ~6 ms for the `sh -c` wrapper removed by exec form, ~1 ms for the append, plus ~8 ms per 5k lines for the seq scan that `head` removes) Measure `nd7 record` wall time on a 1k-event
   session (target: p99 under 5 ms on this laptop). Confirm behaviour when the
   state dir is unwritable, stdin is empty, JSON is malformed: stderr line, exit
   0. Confirm `SessionEnd` fits the 1.5 s budget.

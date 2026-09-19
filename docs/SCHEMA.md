@@ -34,7 +34,7 @@ fields. Agent-specific data never appears here; it goes in `body`.
 
 Why `ts` is ours, not the agent's: the hook payload carries no timestamp
 (verified: none in the documented common or per-event fields). `ts` is the
-moment `nd7 hook` started, which is after Claude Code decided to act and, for
+moment `nd7 record` started, which is after Claude Code decided to act and, for
 `PreToolUse`, before the tool runs. Effect events from the kernel will carry
 their own `ts`; matching them to intent means matching within a window, not
 on equality.

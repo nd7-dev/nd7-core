@@ -8,8 +8,8 @@ format is the contract.
 
 ## Phase 1: what this repo does today
 
-- A library crate, `nd7_core`, and one binary target, `nd7audit`, invoked by
-  Claude Code hooks as `nd7 hook`.
+- A library crate, `nd7_core`, and one binary, `nd7`, whose `record` command
+  is what Claude Code hooks call.
 - Every hook invocation reads the hook JSON from stdin, parses it into a typed
   model of all 33 documented Claude Code hook events, transforms it into one
   nd7 event, and appends it as one NDJSON line to the session's log under an
@@ -41,16 +41,15 @@ hosts, server, UI, a daemon.
 
 ## Install
 
-Build and put the binary on your `PATH` under the name `nd7`:
+Build and put the binary on your `PATH`:
 
 ```sh
-cargo build --release
-ln -s "$PWD/target/release/nd7audit" ~/.cargo/bin/nd7
+cargo install --path .
 ```
 
-For development, point the symlink at `target/debug/nd7audit` instead. Hooks
-are spawned fresh per event, so every `cargo build` is picked up by the next
-hook without restarting Claude Code.
+For development, symlink `~/.cargo/bin/nd7` to `target/debug/nd7` instead.
+Hooks are spawned fresh per event, so every `cargo build` is picked up by the
+next hook without restarting Claude Code.
 
 Register the hook in your Claude Code settings (`~/.claude/settings.json` for
 all projects, or `.claude/settings.json` in a project). Use **exec form**
@@ -61,13 +60,13 @@ itself rather than an intermediate shell. One entry per event you want:
 ```json
 {
   "hooks": {
-    "SessionStart":       [{ "hooks": [{ "type": "command", "command": "nd7", "args": ["hook"], "timeout": 5 }] }],
-    "UserPromptSubmit":   [{ "hooks": [{ "type": "command", "command": "nd7", "args": ["hook"], "timeout": 5 }] }],
-    "PreToolUse":         [{ "hooks": [{ "type": "command", "command": "nd7", "args": ["hook"], "timeout": 5 }] }],
-    "PostToolUse":        [{ "hooks": [{ "type": "command", "command": "nd7", "args": ["hook"], "timeout": 5 }] }],
-    "PostToolUseFailure": [{ "hooks": [{ "type": "command", "command": "nd7", "args": ["hook"], "timeout": 5 }] }],
-    "Stop":               [{ "hooks": [{ "type": "command", "command": "nd7", "args": ["hook"], "timeout": 5 }] }],
-    "SessionEnd":         [{ "hooks": [{ "type": "command", "command": "nd7", "args": ["hook"], "timeout": 1 }] }]
+    "SessionStart":       [{ "hooks": [{ "type": "command", "command": "nd7", "args": ["record"], "timeout": 5 }] }],
+    "UserPromptSubmit":   [{ "hooks": [{ "type": "command", "command": "nd7", "args": ["record"], "timeout": 5 }] }],
+    "PreToolUse":         [{ "hooks": [{ "type": "command", "command": "nd7", "args": ["record"], "timeout": 5 }] }],
+    "PostToolUse":        [{ "hooks": [{ "type": "command", "command": "nd7", "args": ["record"], "timeout": 5 }] }],
+    "PostToolUseFailure": [{ "hooks": [{ "type": "command", "command": "nd7", "args": ["record"], "timeout": 5 }] }],
+    "Stop":               [{ "hooks": [{ "type": "command", "command": "nd7", "args": ["record"], "timeout": 5 }] }],
+    "SessionEnd":         [{ "hooks": [{ "type": "command", "command": "nd7", "args": ["record"], "timeout": 1 }] }]
   }
 }
 ```
@@ -83,7 +82,7 @@ Notes, from the Claude Code hooks reference (https://code.claude.com/docs/en/hoo
 
 - Omitting `matcher` matches every tool. `timeout` is in seconds.
 - A hook that exits non-zero (other than 2) or times out does not block the
-  agent; the action proceeds. `nd7 hook` never prints to stdout, so it cannot
+  agent; the action proceeds. `nd7 record` never prints to stdout, so it cannot
   make a control decision.
 - `SessionEnd` hooks share a 1.5 s budget, hence the shorter timeout.
 - Hook payloads carry no timestamp; `nd7` stamps events at invocation time,
@@ -121,7 +120,7 @@ src/hook/input.rs     typed model of every Claude Code hook payload (FromStr)
 src/hook/event.rs     the nd7 envelope and body
 src/hook/invocation.rs  invocation facts: ts, host, parent pid. Event::new joins them
 src/writer.rs         the per-session append-only log, lock included
-src/bin/nd7audit.rs   the hook binary: parse, transform, append
+src/bin/nd7.rs        the command line; `record` is parse, transform, append
 tests/                multi-process concurrency test against the real binary
 ```
 

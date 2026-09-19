@@ -7,7 +7,7 @@ is shown only to prove the seams exist.
 ```
                          Phase 1                          later phases (dashed)
   ┌───────────────┐   hook JSON    ┌──────────────┐
-  │  Claude Code  │ ───stdin────▶  │  nd7 hook    │
+  │  Claude Code  │ ───stdin────▶  │  nd7 record  │
   │  (hooks)      │                │  (intent)    │
   └───────────────┘                └──────┬───────┘
                                           │ Event{source: intent:claude-code}
@@ -35,12 +35,12 @@ is shown only to prove the seams exist.
                                    └──────────────┘        └ ─ ─ ─ ─ ─ ─ ┘
 ```
 
-## Hook entry point: `nd7 hook`
+## Hook entry point: `nd7 record`
 
 Claude Code runs the configured command for each hook event and pipes one JSON
 object to its stdin (verified against https://code.claude.com/docs/en/hooks).
-The binary is `nd7audit`, installed on `PATH` as `nd7` and registered in exec
-form (`"command": "nd7", "args": ["hook"]`) so no shell sits between Claude
+The binary is `nd7`, registered in exec
+form (`"command": "nd7", "args": ["record"]`) so no shell sits between Claude
 Code and the recorder. It does the following, in order, and nothing else:
 
 1. Take the invocation facts: wall-clock timestamp at nanosecond resolution,
@@ -165,7 +165,7 @@ Every producer, present or future, builds the same `Event` struct and hands it
 to the same writer. The writer does not know or care about `source`. This is
 the whole seam:
 
-- **Codex / other agents**: a new `nd7 hook --agent codex` (or a separate
+- **Codex / other agents**: a new `nd7 record --from codex` (or a separate
   subcommand) parses a different payload into the same event kinds with
   `source: intent:codex`.
 - **Kernel effects**: a long-running `nd7 collector` subscribes to Endpoint
