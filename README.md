@@ -26,9 +26,14 @@ format is the contract.
   before it; the first frame's `prev` is the hash of the session id. A `head`
   sidecar holds the last `seq` and `hash`, so an append reads two small files
   instead of scanning the log.
+- `nd7 verify <session-id>` walks the chain and exits 1 at the first break,
+  naming the frame. Each frame is checked independently against its own bytes
+  and the previous frame's stored hash, so the walk can be parallelised later
+  without changing the checks. `append` repairs a `head` left one frame behind
+  by an interrupted write, and refuses to append onto any other
+  inconsistency.
 
-Not there yet, in order of arrival: automatic repair of a stale `head` on an
-existing log, and the reader (`sessions`, `show`). See
+Not there yet: the reader (`sessions`, `show`). See
 [docs/PHASE-1.md](docs/PHASE-1.md).
 
 Phase 1 records **intent only**: what Claude Code said it was about to do and
