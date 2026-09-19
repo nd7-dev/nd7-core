@@ -299,19 +299,34 @@ impl Display for ChainError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ChainError::Unsealed { seq } => write!(f, "frame {seq} is not a sealed frame"),
-            ChainError::HashMismatch { seq } => write!(f, "frame {seq}: hash does not match its bytes"),
-            ChainError::SeqGap { expected, found } => {
-                write!(f, "expected seq {expected}, found {found}: a frame is missing or out of order")
+            ChainError::HashMismatch { seq } => {
+                write!(f, "frame {seq}: hash does not match its bytes")
             }
-            ChainError::PrevMismatch { seq } => write!(f, "frame {seq}: prev does not match the previous frame"),
+            ChainError::SeqGap { expected, found } => {
+                write!(
+                    f,
+                    "expected seq {expected}, found {found}: a frame is missing or out of order"
+                )
+            }
+            ChainError::PrevMismatch { seq } => {
+                write!(f, "frame {seq}: prev does not match the previous frame")
+            }
             ChainError::TornTail { seq } => write!(f, "frame {seq}: file ends mid-frame"),
-            ChainError::HeadMissing { last_seq } => write!(f, "head is missing; log ends at seq {last_seq}"),
+            ChainError::HeadMissing { last_seq } => {
+                write!(f, "head is missing; log ends at seq {last_seq}")
+            }
             ChainError::HeadInvalid(why) => write!(f, "head is invalid: {why}"),
             ChainError::HeadStale { head_seq, last_seq } => {
-                write!(f, "head is stale: names seq {head_seq}, log ends at seq {last_seq}")
+                write!(
+                    f,
+                    "head is stale: names seq {head_seq}, log ends at seq {last_seq}"
+                )
             }
             ChainError::Truncated { head_seq, last_seq } => {
-                write!(f, "log truncated: head names seq {head_seq}, log ends at seq {last_seq}")
+                write!(
+                    f,
+                    "log truncated: head names seq {head_seq}, log ends at seq {last_seq}"
+                )
             }
             ChainError::HeadMismatch { seq } => write!(f, "head hash does not match frame {seq}"),
             ChainError::Io(why) => write!(f, "{why}"),
@@ -578,7 +593,10 @@ mod tests {
     }
 
     fn head_of(log: &SessionLog) -> Head {
-        fs::read_to_string(log.head_path()).unwrap().parse().unwrap()
+        fs::read_to_string(log.head_path())
+            .unwrap()
+            .parse()
+            .unwrap()
     }
 
     /// The hash embedded in one line of the log.

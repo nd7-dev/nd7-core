@@ -100,8 +100,12 @@ One append-only file per session. The writer:
 3. Reads the chain head (`head`: last `seq` and last `hash`) from a small
    sidecar file, so appending does not require scanning the log. **Done.**
    A missing `head` means a fresh session; genesis `prev` is
-   `BLAKE3(session_id)`. Repair of a stale or missing `head` on an existing
-   log is still pending: today that fails loudly and drops the event.
+   `BLAKE3(session_id)`. A `head` that is missing, or exactly one frame behind
+   with its hash equal to the last frame's `prev`, is repaired from the log's
+   last frame (read backwards from the end, not scanned). Any other
+   disagreement is refused: nothing is appended and the error is reported,
+   because appending onto an inconsistent chain would look exactly like
+   tampering.
 4. Fills in `seq`, `prev`, computes `hash`, serializes the frame, appends it
    with a single `write` on an `O_APPEND` file descriptor. **Done.** The frame
    is serialized once with `hash` absent, those bytes are hashed, and the hash
@@ -112,7 +116,7 @@ One append-only file per session. The writer:
 Crash safety: if the process dies between 4 and 5, `head` is stale by one
 event. The writer detects this on the next append by checking that the last
 frame in the file matches `head`, and repairs `head` from the file's tail.
-The log itself is never rewritten.
+The log itself is never rewritten. Implemented 2026-09-19.
 
 Session start: the first event for an unknown `session_id` creates the
 directory. There is no separate "open session" step because hooks can arrive

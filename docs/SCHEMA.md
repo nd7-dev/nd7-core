@@ -165,6 +165,12 @@ buys hash stability across re-serializers at the cost of a dependency and a
 second serialization pass; we do not need that in Phase 1 because only `nd7`
 writes frames.
 
+Reading the chain back: `verify` locates `seq` and `prev` by searching for the
+byte sequences `,"seq":` and `,"prev":"`. This is sound because JSON escapes
+quotes inside string values, so those sequences can only occur as the
+envelope fields, and because the frame's hash has already proved the bytes
+are exactly what the writer produced.
+
 Genesis: `prev` for `seq` 0 is `BLAKE3(session_id)` (decided 2026-09-19), so a
 chain cannot be transplanted between sessions. Earlier draft: 64 hex zeros,
 with the note: consider binding `session_id`
