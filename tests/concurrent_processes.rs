@@ -37,7 +37,12 @@ fn parallel_hook_processes_get_dense_unique_seqs() {
         })
         .collect();
     for (i, child) in children.iter_mut().enumerate() {
-        child.stdin.take().unwrap().write_all(payload(i).as_bytes()).unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload(i).as_bytes())
+            .unwrap();
     }
     for child in children {
         let out = child.wait_with_output().unwrap();
@@ -51,12 +56,20 @@ fn parallel_hook_processes_get_dense_unique_seqs() {
     let log = fs::read_to_string(root.join("nd7/sessions/procs/events.ndjson")).unwrap();
     let seqs: Vec<u64> = log
         .lines()
-        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["seq"].as_u64().unwrap())
+        .map(|l| {
+            serde_json::from_str::<serde_json::Value>(l).unwrap()["seq"]
+                .as_u64()
+                .unwrap()
+        })
         .collect();
     assert_eq!(seqs.len(), N, "every process appended exactly one frame");
     let unique: BTreeSet<u64> = seqs.iter().copied().collect();
     assert_eq!(unique.len(), N, "no duplicate seq");
-    assert_eq!(unique.iter().copied().collect::<Vec<_>>(), (0..N as u64).collect::<Vec<_>>(), "dense 0..N");
+    assert_eq!(
+        unique.iter().copied().collect::<Vec<_>>(),
+        (0..N as u64).collect::<Vec<_>>(),
+        "dense 0..N"
+    );
 
     let _ = fs::remove_dir_all(&root);
 }
