@@ -204,6 +204,16 @@ first provider.
 Sessions are a random 256-bit id in an HttpOnly, Secure, SameSite=Strict
 cookie, stored server-side with the admin id and an expiry of 12 hours.
 
+The admin CLI does not log in through a provider. It authenticates each
+request with the admin's Ed25519 key (the one derived from the same seed as
+the X25519 key, §4.3) using exactly the request-signing scheme machines use
+(§5), with `X-Nd7-Admin: <fingerprint>` in place of `X-Nd7-Machine`. The
+vault accepts a signed admin request only if the fingerprint belongs to a
+non-removed admin with a registered public key. An admin registers their
+public key once, from the browser after a provider login (`POST /api/me/key`),
+or the bootstrap command sets it. There is therefore no API token, no
+service account and no second kind of secret anywhere in the system.
+
 ## 5. Transport
 
 HTTPS only, TLS 1.3 minimum, standard certificate verification. The one
