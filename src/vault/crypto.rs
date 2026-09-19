@@ -486,7 +486,7 @@ pub fn seal_batch(key: &ChainKey, aad: &BatchAad, plaintext_frames: &[u8]) -> Se
     OsRng.fill_bytes(&mut nonce);
     let ciphertext = XChaCha20Poly1305::new(key.as_bytes().into())
         .encrypt(
-            XNonce::from_slice(&nonce),
+            &XNonce::from(nonce),
             Payload {
                 msg: &compressed,
                 aad: &aad.to_bytes(),
@@ -510,7 +510,7 @@ pub fn open_batch(
 ) -> Result<Vec<u8>, CryptoError> {
     let compressed = XChaCha20Poly1305::new(key.as_bytes().into())
         .decrypt(
-            XNonce::from_slice(&sealed.nonce),
+            &XNonce::from(sealed.nonce),
             Payload {
                 msg: &sealed.ciphertext,
                 aad: &aad.to_bytes(),
