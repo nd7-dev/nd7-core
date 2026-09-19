@@ -53,11 +53,11 @@ Code and the recorder. It does the following, in order, and nothing else:
    everything else, including event names this build has never seen, becomes
    a `hook` event carrying the raw payload, so an upgrade of Claude Code never
    causes silent data loss.
-4. Append the event to the session log (`writer::SessionLog::append`).
+4. Append the event to the session log (`session_log::SessionLog::append`).
 5. Exit 0 with no stdout.
 
 The crate is a library, `nd7_core`, plus binary targets. `hook` is pure and
-never touches the filesystem; `writer` is the only module that knows where
+never touches the filesystem; `session_log` is the only module that knows where
 events live. The binary is the composition point, about ten lines.
 
 Rules:
@@ -154,7 +154,10 @@ nono uses the same location class for its audit logs.
   divergence, if any. In Phase 1 this proves only that the file has not been
   edited since it was written by *this* machine; anyone with write access can
   rewrite the whole chain. Signing (Phase 2+) closes that gap. The reader says
-  so in its output.
+  so in its output. Implemented: checks, in order, that each line is a sealed
+  frame, that its hash matches its bytes, that `seq` matches its position,
+  that `prev` matches the previous hash (genesis: BLAKE3 of the session id),
+  then compares the tail to `head`; stops at the first failure and exits 1.
 
 The reader is the only component that reads the log. Nothing in the hook path
 depends on it.

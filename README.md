@@ -27,8 +27,8 @@ format is the contract.
   sidecar holds the last `seq` and `hash`, so an append reads two small files
   instead of scanning the log.
 
-Not there yet, in order of arrival: repair of a missing or stale `head` on an
-existing log, the `verify` command, and the reader (`sessions`, `show`). See
+Not there yet, in order of arrival: automatic repair of a stale `head` on an
+existing log, and the reader (`sessions`, `show`). See
 [docs/PHASE-1.md](docs/PHASE-1.md).
 
 Phase 1 records **intent only**: what Claude Code said it was about to do and
@@ -100,13 +100,20 @@ tail -f ~/.local/state/nd7/sessions/<session-id>/events.ndjson \
   | jq -c '{seq, kind, ev: .body.hook_event_name, tool: .body.tool_name}'
 ```
 
+```sh
+nd7 verify <session-id>   # recompute the hash chain, exit 1 at the first break
+```
+
+A clean result proves only that the log has not been edited since its last
+frame was written by this machine; anyone with write access could still
+rewrite the whole chain.
+
 Planned commands, not yet implemented:
 
 ```sh
 nd7 sessions              # list recorded sessions, newest first
 nd7 show <session-id>     # human-readable timeline
 nd7 show <session-id> --json   # raw events, one per line
-nd7 verify <session-id>   # recompute the hash chain
 ```
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the layout and
@@ -119,7 +126,7 @@ src/lib.rs            nd7_core: everything the binaries share
 src/hook/input.rs     typed model of every Claude Code hook payload (FromStr)
 src/hook/event.rs     the nd7 envelope and body
 src/hook/invocation.rs  invocation facts: ts, host, parent pid. Event::new joins them
-src/writer.rs         the per-session append-only log, lock included
+src/session_log.rs    the per-session append-only log: lock, head, chain, verify
 src/bin/nd7.rs        the command line; `record` is parse, transform, append
 tests/                multi-process concurrency test against the real binary
 ```
@@ -139,4 +146,4 @@ the measurements behind that and behind not running a daemon.
 ## Status
 
 Pre-alpha. The schema is a draft and will change until it is marked `v1`.
-Frames carry `prev` and `hash`; nothing verifies them yet, `verify` is next.
+Frames carry `prev` and `hash`, and `nd7 verify` checks them.
