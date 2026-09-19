@@ -51,16 +51,30 @@ pub fn genesis_prev(session_id: &str) -> String {
     blake3::hash(session_id.as_bytes()).to_hex().to_string()
 }
 
-/// Split a sealed line into the bytes that were hashed and the embedded hash.
-/// Returns `None` if the line does not end in a `hash` member.
-pub fn split_sealed(line: &str) -> Option<(String, &str)> {
-    let line = line.trim_end_matches('\n');
-    let rest = line.strip_suffix("\"}")?;
-    let (prefix, hash) = rest.rsplit_once(",\"hash\":\"")?;
-    if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+/// Split a sealed line into (bytes before `,"hash":"`, embedded hash hex).
+///
+/// The bytes the hash covers are `prefix` followed by a single `}`: the splice
+/// in [`Event::seal`] replaced that closing brace with the `hash` member. Feed
+/// them to [`hash_sealed_prefix`] rather than joining them, so checking a frame
+/// allocates nothing. Returns `None` if the line does not end in a `hash`
+/// member holding 64 ASCII hex digits.
+pub fn split_sealed(line: &[u8]) -> Option<(&[u8], &str)> {
+    let line = line.strip_suffix(b"\n").unwrap_or(line);
+    let rest = line.strip_suffix(b"\"}")?;
+    // The member is fixed width, so cut it off the end instead of searching.
+    let (prefix, hash) = rest.split_at_checked(rest.len().checked_sub(64)?)?;
+    let prefix = prefix.strip_suffix(b",\"hash\":\"")?;
+    if !hash.iter().all(u8::is_ascii_hexdigit) {
         return None;
     }
-    Some((format!("{prefix}}}"), hash))
+    // Hex digits, so this is ASCII and the conversion cannot fail.
+    Some((prefix, std::str::from_utf8(hash).ok()?))
+}
+
+/// BLAKE3 over what a sealed frame's `hash` covers: the prefix from
+/// [`split_sealed`] and the `}` that closed the frame before the splice.
+pub fn hash_sealed_prefix(prefix: &[u8]) -> blake3::Hash {
+    blake3::Hasher::new().update(prefix).update(b"}").finalize()
 }
 
 /// Event kinds of Phase 1 (SCHEMA.md section 2).
@@ -463,11 +477,13 @@ mod tests {
         assert_eq!(hash.len(), 64);
 
         // What verify will do: cut the suffix, hash the rest, compare.
-        let (hashed, embedded) = split_sealed(&line).expect("sealed line");
+        let (prefix, embedded) = split_sealed(line.as_bytes()).expect("sealed line");
         assert_eq!(embedded, hash);
-        assert_eq!(blake3::hash(hashed.as_bytes()).to_hex().to_string(), hash);
-        // The hashed bytes are exactly the unsealed serialization.
-        assert_eq!(hashed, serde_json::to_string(&ev).unwrap());
+        assert_eq!(hash_sealed_prefix(prefix).to_hex().as_str(), hash);
+        // The hashed bytes -- prefix plus the brace seal() replaced -- are
+        // exactly the unsealed serialization.
+        let hashed = [prefix, b"}"].concat();
+        assert_eq!(hashed, serde_json::to_string(&ev).unwrap().as_bytes());
 
         // The line reads back as the same event plus its hash.
         let back: Event = serde_json::from_str(&line).unwrap();
@@ -477,8 +493,14 @@ mod tests {
 
     #[test]
     fn split_sealed_rejects_unsealed_or_mangled_lines() {
-        assert!(split_sealed(r#"{"v":0}"#).is_none());
-        assert!(split_sealed(r#"{"v":0,"hash":"abc"}"#).is_none());
-        assert!(split_sealed("").is_none());
+        assert!(split_sealed(br#"{"v":0}"#).is_none());
+        assert!(split_sealed(br#"{"v":0,"hash":"abc"}"#).is_none());
+        assert!(split_sealed(b"").is_none());
+        // 64 characters, but not all hex.
+        let bad = format!(r#"{{"v":0,"hash":"{}"}}"#, "z".repeat(64));
+        assert!(split_sealed(bad.as_bytes()).is_none());
+        // The right length in the wrong member.
+        let bad = format!(r#"{{"v":0,"nothash":"{}"}}"#, "a".repeat(64));
+        assert!(split_sealed(bad.as_bytes()).is_none());
     }
 }

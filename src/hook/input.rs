@@ -3,7 +3,7 @@
 //! Claude Code delivers one JSON object per hook invocation on stdin. Every
 //! payload carries the [`Common`] fields plus fields specific to the event
 //! named in `hook_event_name`. This module models all events documented in
-//! the hooks reference (https://code.claude.com/docs/en/hooks, read on
+//! the hooks reference (<https://code.claude.com/docs/en/hooks>, read on
 //! 2026-09-18) and keeps anything it does not recognise instead of failing.
 //!
 //! Design rules:
