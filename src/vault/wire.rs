@@ -36,6 +36,12 @@ pub struct EnrollRequest {
     /// The machine's Ed25519 public key, base64 of 32 bytes.
     pub public_key: String,
     pub host: String,
+    /// `nd7 enroll --rotate`: register this key under the machine id the
+    /// host already has and retire the old one (§4.4). Absent from an
+    /// ordinary enrolment, which is why it defaults rather than being
+    /// required; without it a host that is already enrolled is refused.
+    #[serde(default)]
+    pub rotate: bool,
 }
 
 /// `POST /v1/enroll` response, `201`.
