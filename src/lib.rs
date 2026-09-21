@@ -4,6 +4,8 @@
 //!
 //! - [`hook`]: Claude Code hook payload types, the nd7 event model, and the
 //!   transform between them. Pure; no I/O.
+//! - [`hook_prefix`]: the `PreToolUse` reply that routes Claude Code's Bash
+//!   commands through `nd7-exec`. Pure; no I/O.
 //! - [`policy`]: what a session may do, rendered as the two Seatbelt
 //!   profiles that enforce it. Pure; no I/O.
 //! - [`session`]: the directory one `nd7 run` owns, where `nd7-exec` finds
@@ -17,6 +19,7 @@
 //!   server share. Pure; no I/O.
 
 pub mod hook;
+pub mod hook_prefix;
 pub mod policy;
 #[cfg(target_os = "macos")]
 pub mod sandbox;
