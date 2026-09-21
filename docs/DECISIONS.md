@@ -283,3 +283,80 @@ adds them, and both still land as `kind: hook` if they do.
 - Must revisit if a single session's log grows past what a machine should
   hold, or if a producer other than Claude Code emits content of a different
   order of magnitude.
+
+## ADR-0007: Sandbox Claude Code with one Seatbelt floor and a trampoline, and refuse every other profile
+
+- Date: 2026-09-21
+- Status: accepted
+
+### Context
+Seatbelt applies one profile to a process tree and refuses any attempt by a
+confined process to apply a different one: looser, tighter, a superset, a
+subset, or the same rules with other parameters all fail with EPERM; only a
+semantically identical profile is accepted, as a no-op. Two consequences
+were measured (docs/spikes/2026-09-20-C-trampoline.md): a session's boundary
+cannot change while it runs, and Claude Code's own per-command sandbox, which
+wraps each Bash call in `sandbox-exec`, cannot start under an outer profile.
+Depending on the outer rules it either exits every Bash call with code 71 or
+fails to initialise and disables itself for the session, silently.
+
+Three facts made a design possible. The SBPL exec modifier `(with no-sandbox)`
+lets exec of one literal path leave the sandbox; the child is unconfined and
+may apply any fresh profile. A `PreToolUse` hook can rewrite a Bash command
+and force-allow it. And a process can read its parent-pid chain from inside
+the floor, so a helper can find its session by ancestry, which a caller
+cannot forge.
+
+### Decision
+- `nd7 run` applies one profile, the floor, to `claude` and its whole tree.
+  The floor allows the project, the temp dir, `~/.claude`, Claude Code's
+  scratch, HTTPS and DNS, and denies everything else, including writes under
+  `~/.nd7` by a per-operation rule placed last.
+- The floor has exactly one exit: `nd7-exec`, found next to the `nd7` binary.
+  A `PreToolUse` hook installed by `nd7 run` via `--settings` rewrites every
+  Bash command to `nd7-exec -c '<command>'`. `nd7-exec` finds its session by
+  walking parent pids to `~/.nd7/sessions/<pid>`, reads that session's policy,
+  applies it to itself and execs the shell. It takes nothing from argv, cwd or
+  environment, and it refuses, exit 126, without a session or a policy.
+- Every other profile is refused by the kernel. Claude Code's sandbox is
+  turned off for the session by the same `--settings` flag so the refusal does
+  not cost a broken tool call; the floor would refuse it regardless.
+- `nd7 allow` and `nd7 deny` edit the session's grants; the next command runs
+  under the new policy. There is no daemon and no socket.
+
+### Alternatives considered
+- **Let `/usr/bin/sandbox-exec` out through a second exit**, so Claude Code's
+  sandbox works under ours. Measured to work, and rejected: a Bash command
+  then ran under Claude Code's profile alone, with nd7 no longer on top of it.
+- **Intercept Claude Code's `env … sandbox-exec -p <profile>` invocation**
+  with an nd7 binary named `env` on PATH, and apply the intersection of its
+  profile and the floor. Measured to work end to end, including Claude Code's
+  domain-filtering proxy (docs/spikes/2026-09-21-D-interposer.md). Shelved:
+  it stands on how Claude Code spawns processes, which is not API. It is the
+  fallback if hostname filtering is wanted before nd7 has its own proxy.
+- **A broker daemon** the sandboxed side asks to run commands, over a unix
+  socket with descriptor passing (docs/spikes/2026-09-20-A-broker.md). Works;
+  the trampoline gives the same per-call policy with no daemon, no protocol
+  and no 104-byte socket path limit.
+- **Floor only, restart to widen.** The fallback that remains if the hook
+  ever stops applying: `--resume` under a wider floor costs about 3 seconds.
+- **A Linux microVM.** More control and no nesting problem, at the cost of the
+  developer's environment. It is Tier 2, not a replacement.
+
+### Consequences
+- Nothing inside the sandbox can loosen it, and nothing depends on how Claude
+  Code spawns processes. If the hook stops applying, commands run unprefixed
+  under the floor, which is never wider: the failure is closed.
+- Claude Code's `/sandbox` settings have no effect under nd7, and hostname
+  filtering is lost until nd7 has a proxy. Both are stated in the README.
+- Write and Edit run inside the `claude` process and see only the floor;
+  `nd7 allow` reaches Bash. Widening them means a restart.
+- Three Seatbelt behaviours are now load-bearing and documented in
+  `policy.rs`: per-operation rules beat class rules regardless of order;
+  inside `require-not` a wildcard port never matches; `(trace)` is dead on
+  current macOS. The exit binary must never take a policy path from anything
+  the caller controls; two escapes of a naive version are recorded in the
+  spike and in `tests/nd7_exec.rs`.
+- Must revisit if Apple removes `no-sandbox`, if Claude Code stops honouring
+  `PreToolUse` `updatedInput`, or when recorded sessions give an exec
+  allowlist for the floor.

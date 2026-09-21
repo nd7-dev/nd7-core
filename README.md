@@ -43,20 +43,83 @@ what it reported back. It is not proof of what ran on the machine. See
 [docs/VISION.md](docs/VISION.md) for where kernel-observed effects, remote
 hosts, enforcement and undo fit in.
 
-Non-goals right now: Endpoint Security, Seatbelt, enforcement, undo, remote
-hosts, server, UI, a daemon.
+The first piece of enforcement is in: `nd7 run claude` puts Claude Code and
+everything it spawns under a kernel sandbox, with a policy you can widen
+while the session runs. See [Sandbox](#sandbox-macos) below.
+
+Non-goals right now: Endpoint Security, undo, remote hosts, server, UI, a
+daemon.
 
 ## Install
 
-Build and put the binary on your `PATH`:
+macOS. You need a Rust toolchain (https://rustup.rs). One command installs
+both binaries, `nd7` and `nd7-exec`, into `~/.cargo/bin`:
 
 ```sh
-cargo install --path .
+cargo install --locked --git https://github.com/nd7-dev/nd7-core
 ```
 
-For development, symlink `~/.cargo/bin/nd7` to `target/debug/nd7` instead.
-Hooks are spawned fresh per event, so every `cargo build` is picked up by the
-next hook without restarting Claude Code.
+From a checkout, `cargo install --locked --path .` does the same. For
+development, symlink `~/.cargo/bin/nd7` and `~/.cargo/bin/nd7-exec` to the
+`target/debug/` binaries instead; hooks are spawned fresh per event, so every
+`cargo build` is picked up by the next hook without restarting Claude Code.
+
+The two binaries must stay next to each other: `nd7 run` finds `nd7-exec` by
+looking beside itself, and refuses to start if it is missing or writable by
+anyone but you.
+
+## Sandbox (macOS)
+
+```sh
+cd your-project
+nd7 run claude
+```
+
+That is the whole setup. `nd7 run` applies a Seatbelt profile to `claude` and
+every process it spawns, then starts it with the flags it needs: a
+`PreToolUse` hook that routes every Bash command through `nd7-exec`, its own
+sandbox turned off (the kernel refuses a second profile anyway), and one
+paragraph in the system prompt so a denial is reported as nd7's policy rather
+than as Claude Code's permission rules. Nothing in your Claude Code settings
+changes; the flags apply to that session only. Any other program works the
+same way, `nd7 run zsh` for instance, without the Claude-specific flags.
+
+What the session may do, from the start:
+
+| | allowed |
+|---|---|
+| write | the project directory, the temp dir, `~/.claude`, Claude Code's scratch under `/private/tmp/claude-*` |
+| read | everything except `~/.ssh`, `~/.aws` and `~/.nd7` |
+| network | HTTPS (port 443) and DNS. `git` over HTTPS works; over SSH it does not |
+| run | anything, inside the same boundary |
+
+Widen it while the session runs, from another terminal:
+
+```sh
+nd7 allow ~/data      # writable from the next Bash command on
+nd7 deny  ~/data      # taken back
+```
+
+No restart. Grants are per session and vanish when it ends. Paths under
+`~/.nd7` can never be granted. If several sessions are running, add
+`--session <pid>`; the pid is printed when `nd7 run` starts.
+
+How it holds. The profile is applied once, to the whole process tree, and
+the kernel lets a confined process apply no other profile, so nothing inside
+can loosen it: not the model, not a compromised dependency, not Claude
+Code's own sandbox. The one program allowed out is `nd7-exec`, which applies
+the session's current policy to itself and becomes the shell for the command;
+it takes nothing from the caller's arguments, cwd or environment, and it
+refuses to run at all if it cannot find its session or its policy. A command
+that skips the prefix runs under the floor, which is never wider. The full
+argument, with the measurements and the alternatives that were rejected, is
+in [docs/DECISIONS.md](docs/DECISIONS.md) (ADR-0007) and the spike reports
+under [docs/spikes/](docs/spikes/).
+
+Known limits: Write and Edit run inside the `claude` process, so `nd7 allow`
+widens Bash but not those tools (restart `nd7 run claude --resume <id>` for
+that); `ps` and `pgrep` are denied; Seatbelt filters network by port, not
+hostname; Linux is Tier 2 and not yet built.
 
 Register the hook in your Claude Code settings (`~/.claude/settings.json` for
 all projects, or `.claude/settings.json` in a project). Use **exec form**
@@ -154,7 +217,12 @@ src/hook/invocation.rs  invocation facts: ts, host, parent pid. Event::new joins
 src/session_log.rs    the per-session append-only log: lock, head, chain, verify
 src/vault/            wire format and cryptography shared with the vault server; pure
 src/ship.rs           `enroll` and `ship`: the session directory, the vault files, the network
-src/bin/nd7.rs        the command line; `record` is parse, transform, append
+src/policy.rs         a session's rules, rendered as the floor and the per-command profile
+src/session.rs        the directory one `nd7 run` owns, where `nd7-exec` finds its policy
+src/sandbox.rs        Seatbelt: apply a profile in pre_exec, or to the calling process
+src/hook_prefix.rs    the PreToolUse reply that routes a Bash command through `nd7-exec`
+src/bin/nd7.rs        the command line; `record` is parse, transform, append; `run`, `allow`, `deny`
+src/bin/nd7-exec.rs   the one program the floor lets out: apply the policy, become the shell
 tests/                multi-process concurrency test and a fake vault, against the real binary
 bench/                reproducible record/verify benchmark (Python, stdlib only)
 ```
@@ -172,10 +240,13 @@ the measurements behind that and behind not running a daemon.
 - [docs/PHASE-1.md](docs/PHASE-1.md): milestone checklist.
 - [docs/DECISIONS.md](docs/DECISIONS.md): decision log.
 - [docs/COMPETITIVE-NOTES.md](docs/COMPETITIVE-NOTES.md): comparison with nono.
+- [docs/spikes/](docs/spikes/): the sandbox spikes, with every measurement behind ADR-0007.
 
 ## Status
 
 Pre-alpha. The schema is a draft and will change until it is marked `v1`.
-Frames carry `prev` and `hash`, and `nd7 verify` checks them.
+Frames carry `prev` and `hash`, and `nd7 verify` checks them. The sandbox
+is new and tested on macOS 26 with Claude Code 2.1.x; the policy will
+tighten as recorded sessions show what is actually needed.
 
 Licence: not yet chosen.
