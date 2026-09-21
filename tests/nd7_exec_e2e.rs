@@ -251,8 +251,8 @@ fn caller_cwd_does_not_widen() {
 
 /// The real path, no `--profile`: `nd7 run` builds the policy from its cwd,
 /// creates the session, applies the rendered floor, and removes the session
-/// when the program exits. `ND7_EXIT` points the floor's exit at the freshly
-/// built binary and `ND7_SESSIONS_DIR` keeps the record out of `~/.nd7`.
+/// when the program exits. The exit is the `nd7-exec` built next to `nd7`, and
+/// `ND7_SESSIONS_DIR` keeps the record out of `~/.nd7`.
 #[test]
 fn nd7_run_creates_the_session_and_applies_the_rendered_floor() {
     let (root, proj, _floor) = setup("real-run");
@@ -282,7 +282,6 @@ fn nd7_run_creates_the_session_and_applies_the_rendered_floor() {
         .args(["run", "/bin/zsh", "-c", &script])
         .current_dir(&proj)
         .env("ND7_SESSIONS_DIR", &sessions)
-        .env("ND7_EXIT", EXEC)
         .output()
         .unwrap();
     let stdout = stdout(&out);

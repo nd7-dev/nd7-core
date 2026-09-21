@@ -5,8 +5,11 @@
 //! - `nd7 verify <session-id>`: walk that session's chain and report.
 //! - `nd7 enroll <server> <token>`: bind this machine to a vault.
 //! - `nd7 ship`: push unshipped frames to that vault.
-//! - `nd7 run [--profile <file>] <program> [args...]`: run a program under a
-//!   Seatbelt profile. macOS only.
+//! - `nd7 run [--profile <file>] <program> [args...]`: run a program under
+//!   nd7's sandbox: a session, the floor profile, and for `claude` the hook
+//!   that routes every Bash command through `nd7-exec`. macOS only.
+//! - `nd7 hook-prefix`: the PreToolUse hook `nd7 run` installs; rewrites a
+//!   Bash command to run through `nd7-exec`.
 //!
 //! Plain blocking I/O; nothing here needs a runtime.
 //!
@@ -37,8 +40,11 @@ commands:
                              --prune-after <duration> deletes fully shipped sessions.
                              Durations are like 30s, 5m, 2h, 30d. See docs/VAULT.md.
   run <program> [args...]    run a program under nd7's sandbox: a session is created and
-                             the floor profile applied; --profile <file> applies that raw
-                             profile instead, with no session";
+                             the floor profile applied; for claude, the Bash hook and the
+                             system-prompt note are added too. --profile <file> applies
+                             that raw profile instead, with no session
+  hook-prefix                the PreToolUse hook nd7 run installs: reads the payload on
+                             stdin, replies with the Bash command routed through nd7-exec";
 
 /// What a clean verify does and does not prove. Printed with every success so
 /// nobody reads it as more than it is.
@@ -119,6 +125,7 @@ fn main() -> ExitCode {
             }
         },
         Some("run") => run(args),
+        Some("hook-prefix") => hook_prefix(),
         Some("-h" | "--help") => {
             println!("{USAGE}");
             ExitCode::SUCCESS
@@ -194,7 +201,7 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
         let policy = Policy {
             project: env::current_dir()?.canonicalize()?,
             tmp: env::temp_dir().canonicalize()?,
-            exit: exit_path(&home),
+            exit: exit_path()?,
             home,
             grants: Vec::new(),
         };
@@ -204,20 +211,35 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
             "nd7 run: session {} under nd7's policy; a sandbox the program applies itself is refused",
             std::process::id()
         );
-        let status = nd7_core::sandbox::spawn_with_profile(&policy.render_floor(), program, &[])
-            .args(args)
-            .status()?;
+        let mut cmd = nd7_core::sandbox::spawn_with_profile(&policy.render_floor(), program, &[]);
+        if std::path::Path::new(program)
+            .file_name()
+            .is_some_and(|n| n == "claude")
+        {
+            cmd.args(claude_flags()?);
+        }
+        let status = cmd.args(args).status()?;
         drop(session);
         Ok(status)
     }
 
-    /// Where `nd7-exec` is installed. The floor lets exactly this path out.
-    fn exit_path(home: &std::path::Path) -> PathBuf {
-        #[cfg(feature = "test-seams")]
-        if let Some(p) = env::var_os("ND7_EXIT") {
-            return PathBuf::from(p);
-        }
-        home.join(".nd7/bin/nd7-exec")
+    /// What `claude` needs to work with the floor: its own sandbox off, since
+    /// the floor refuses any other profile anyway and the failure would cost
+    /// one broken tool call; the hook that routes every Bash command through
+    /// `nd7-exec`; and one line in the system prompt so a denial is read as
+    /// nd7's and not as Claude Code's own rules.
+    fn claude_flags() -> Result<Vec<String>> {
+        let hook = format!("{} hook-prefix", nd7_binary()?.display());
+        let settings = serde_json::json!({
+            "sandbox": { "enabled": false },
+            "hooks": { "PreToolUse": [ { "matcher": "Bash", "hooks": [ { "type": "command", "command": hook } ] } ] }
+        });
+        Ok(vec![
+            "--settings".to_owned(),
+            settings.to_string(),
+            "--append-system-prompt".to_owned(),
+            SYSTEM_PROMPT.to_owned(),
+        ])
     }
 
     /// Where sessions are recorded. Must agree with `nd7-exec`, which derives
@@ -253,6 +275,12 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
         Ok(())
     }
 
+    const SYSTEM_PROMPT: &str = "This session runs under nd7's kernel sandbox. Bash commands are \
+routed through nd7-exec by a hook and run under the session's policy: the project directory is \
+writable, most of the rest of the filesystem is not, and only HTTPS egress is open. An \
+'operation not permitted' error is that policy, not Claude Code's permission rules. Do not try \
+to route around it; tell the user what was denied so they can run `nd7 allow <path>`.";
+
     // `--profile` is ours only before the program: from the program on, every
     // argument is the child's, including the ones that look like options.
     let (mut profile, mut program) = (None, None);
@@ -286,6 +314,45 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// `nd7 hook-prefix`: Claude Code's PreToolUse hook. Reads the payload on
+/// stdin and, for a Bash command, replies with the same command routed through
+/// `nd7-exec`. Anything that goes wrong is reported on stderr and the reply
+/// is empty: the command then runs unprefixed, where the floor denies it, so
+/// a failing hook can only make things stricter.
+fn hook_prefix() -> ExitCode {
+    let mut payload = String::new();
+    if let Err(e) = io::stdin().read_to_string(&mut payload) {
+        eprintln!("nd7 hook-prefix: {e}");
+        return ExitCode::SUCCESS;
+    }
+    let exit = match exit_path() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("nd7 hook-prefix: {e}");
+            return ExitCode::SUCCESS;
+        }
+    };
+    match nd7_core::hook_prefix::respond(&payload, &exit) {
+        Ok(Some(reply)) => println!("{reply}"),
+        Ok(None) => {}
+        Err(e) => eprintln!("nd7 hook-prefix: {e}"),
+    }
+    ExitCode::SUCCESS
+}
+
+/// This binary, resolved: the hook command and the exit path are derived
+/// from it, so `nd7 run` and the hook it installs always agree.
+fn nd7_binary() -> Result<std::path::PathBuf> {
+    Ok(env::current_exe()?.canonicalize()?)
+}
+
+/// `nd7-exec`, installed next to this binary. The floor lets exactly this
+/// path out of the sandbox, so it is found by where nd7 itself is, never by
+/// anything in the environment.
+fn exit_path() -> Result<std::path::PathBuf> {
+    Ok(nd7_binary()?.with_file_name("nd7-exec"))
 }
 
 #[cfg(not(target_os = "macos"))]
