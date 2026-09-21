@@ -17,6 +17,20 @@ path = "src/bin/nd7.rs"
 name = "nd7-exec"
 path = "src/bin/nd7-exec.rs"
 
+# `nd7-exec` must never take its session directory from the environment: the
+# environment belongs to the caller it defends against. The override exists
+# only for the tests, so it is gated at compile time rather than at run time.
+[features]
+test-seams = []
+
+[[test]]
+name = "nd7_exec"
+required-features = ["test-seams"]
+
+[[test]]
+name = "nd7_exec_e2e"
+required-features = ["test-seams"]
+
 [dependencies]
 base64 = "0.23"
 blake3 = "1.8.7"

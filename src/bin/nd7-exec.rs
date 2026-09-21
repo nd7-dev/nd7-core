@@ -32,17 +32,23 @@ run: no nd7 session, no policy, the policy could not be applied, or the shell
 could not be executed.";
 
 fn main() -> ExitCode {
-    let mut args = args().skip(1);
-    let usage = || {
-        eprintln!("{USAGE}");
-        ExitCode::from(2)
-    };
+    match parse_args(args().skip(1)) {
+        Some(cmd) => run(&cmd),
+        None => {
+            eprintln!("{USAGE}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// Exactly `-c <command>`, and nothing else.
+fn parse_args(mut args: impl Iterator<Item = String>) -> Option<String> {
     match args.next().as_deref() {
         Some("-c") => match args.next() {
-            Some(cmd) if args.next().is_none() => run(&cmd),
-            _ => usage(), // missing command, or something after it
+            Some(cmd) if args.next().is_none() => Some(cmd),
+            _ => None, // missing command, or something after it
         },
-        _ => usage(), // unknown flag, or no arguments
+        _ => None, // unknown flag, or no arguments
     }
 }
 
@@ -52,11 +58,10 @@ fn run(cmd: &str) -> ExitCode {
     }
     // Out of the outer sandbox now: the only way to a shell is through a
     // successfully applied session policy.
-    let home = match home() {
+    let sessions_dir = match sessions_dir() {
         Ok(p) => p,
         Err(e) => return refuse(&e.to_string()),
     };
-    let sessions_dir = home.join(".nd7/sessions");
     let Some(session) = find_session(&sessions_dir) else {
         return refuse("no nd7 session in this process's ancestry");
     };
@@ -82,6 +87,18 @@ fn exec_with_policy(policy: &Path, cmd: &str) -> ExitCode {
         Ok(()) => exec_shell(cmd),
         Err(e) => refuse(&format!("apply session policy: {e}")),
     }
+}
+
+/// Where the session records live. The environment is the caller's, and the
+/// caller is what we are defending against, so this is `$HOME/.nd7/sessions`
+/// with `$HOME` from passwd. `ND7_SESSIONS_DIR` is a test seam and is only
+/// compiled in under the `test-seams` feature, never in a release build.
+fn sessions_dir() -> Result<PathBuf> {
+    #[cfg(feature = "test-seams")]
+    if let Some(dir) = std::env::var_os("ND7_SESSIONS_DIR") {
+        return Ok(PathBuf::from(dir));
+    }
+    Ok(home()?.join(".nd7/sessions"))
 }
 
 fn home() -> Result<PathBuf> {
@@ -139,4 +156,107 @@ fn exec_shell(cmd: &str) -> ExitCode {
 
 fn confined() -> bool {
     unsafe { sandbox_check(libc::getpid(), std::ptr::null(), 0) != 0 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// A fresh empty directory for one test, named after the test and this pid.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("nd7-exec-unit-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn parse(args: &[&str]) -> Option<String> {
+        parse_args(args.iter().map(|a| (*a).to_owned()))
+    }
+
+    #[test]
+    fn parse_args_takes_exactly_dash_c_and_a_command() {
+        assert_eq!(parse(&["-c", "x"]).as_deref(), Some("x"));
+        assert_eq!(parse(&["-c"]), None);
+        assert_eq!(parse(&[]), None);
+        assert_eq!(parse(&["-c", "a", "b"]), None);
+        assert_eq!(parse(&["-x", "y"]), None);
+    }
+
+    #[test]
+    fn parent_of_this_process_is_our_parent() {
+        let me = unsafe { libc::getpid() };
+        let parent = unsafe { libc::getppid() };
+        assert_eq!(parent_of(me), Some(parent));
+    }
+
+    #[test]
+    fn parent_of_a_pid_that_does_not_exist_is_none() {
+        assert_eq!(parent_of(2_000_000_000), None);
+    }
+
+    #[test]
+    fn find_session_returns_the_ancestors_directory() {
+        let dir = scratch("find-session");
+        let parent = unsafe { libc::getppid() };
+        let session = dir.join(parent.to_string());
+        fs::create_dir_all(&session).unwrap();
+
+        assert_eq!(find_session(&dir), Some(session));
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn find_session_ignores_an_unrelated_pid() {
+        let dir = scratch("unrelated-pid");
+        fs::create_dir_all(dir.join("999999999")).unwrap();
+
+        assert_eq!(find_session(&dir), None);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn find_session_starts_at_the_parent_not_at_us() {
+        // Our own pid is not in the walk: a caller cannot make itself a session.
+        let dir = scratch("own-pid");
+        fs::create_dir_all(dir.join(std::process::id().to_string())).unwrap();
+
+        assert_eq!(find_session(&dir), None);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn policy_is_found_only_when_the_file_is_there() {
+        let dir = scratch("policy");
+        assert_eq!(policy(dir.clone()), None);
+
+        let path = dir.join("policy.sb");
+        fs::write(&path, "(version 1)\n").unwrap();
+        assert_eq!(policy(dir.clone()), Some(path));
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn home_is_the_passwd_directory_of_this_user() {
+        let pw = unsafe { libc::getpwuid(libc::getuid()) };
+        assert!(!pw.is_null());
+        let name = unsafe { CStr::from_ptr((*pw).pw_name) }
+            .to_str()
+            .unwrap()
+            .to_owned();
+
+        let home = home().unwrap();
+        assert!(home.is_absolute(), "{}", home.display());
+        assert!(home.is_dir(), "{}", home.display());
+        assert!(
+            home.ends_with(&name),
+            "{} does not end with {name}",
+            home.display()
+        );
+    }
 }
