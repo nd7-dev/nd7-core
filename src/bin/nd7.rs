@@ -36,8 +36,9 @@ commands:
   ship                       push unshipped frames to the vault; --every <duration> loops,
                              --prune-after <duration> deletes fully shipped sessions.
                              Durations are like 30s, 5m, 2h, 30d. See docs/VAULT.md.
-  run <program> [args...]    run a program under a Seatbelt profile; --profile <file>
-                             uses that profile instead of the built-in one";
+  run <program> [args...]    run a program under nd7's sandbox: a session is created and
+                             the floor profile applied; --profile <file> applies that raw
+                             profile instead, with no session";
 
 /// What a clean verify does and does not prove. Printed with every success so
 /// nobody reads it as more than it is.
@@ -164,25 +165,92 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
             .map_err(|path| format!("path is not UTF-8: {path:?}").into())
     }
 
-    fn spawn(
-        profile: Option<String>,
+    /// `--profile <file>`: the raw profile, with PROJ, TMP and HOME as
+    /// parameters, and no session. For experiments.
+    fn spawn_raw(
+        path: &str,
         program: &str,
         args: impl Iterator<Item = String>,
     ) -> Result<ExitStatus> {
-        let profile = match profile {
-            Some(path) => std::fs::read_to_string(path)?,
-            None => nd7_core::sbprofiles::CLAUDE.to_owned(),
-        };
+        let profile = std::fs::read_to_string(path)?;
         // `subpath` matches resolved paths, so the parameters are canonical.
         let proj = param(env::current_dir()?.canonicalize()?)?;
         let tmp = param(env::temp_dir().canonicalize()?)?;
-        let home = env::var("HOME")?;
+        let home = param(nd7_core::session::home()?)?;
         let params = [("PROJ", &*proj), ("TMP", &*tmp), ("HOME", &*home)];
         Ok(
             nd7_core::sandbox::spawn_with_profile(&profile, program, &params)
                 .args(args)
                 .status()?,
         )
+    }
+
+    /// The real thing: a session with this run's policy, and the floor
+    /// rendered from it applied to the program and everything it spawns.
+    fn spawn(program: &str, args: impl Iterator<Item = String>) -> Result<ExitStatus> {
+        use nd7_core::{policy::Policy, session::Session};
+
+        let home = nd7_core::session::home()?;
+        let policy = Policy {
+            project: env::current_dir()?.canonicalize()?,
+            tmp: env::temp_dir().canonicalize()?,
+            exit: exit_path(&home),
+            home,
+            grants: Vec::new(),
+        };
+        trusted(&policy.exit)?;
+        let session = Session::create(&sessions_root(&policy.home), &policy)?;
+        eprintln!(
+            "nd7 run: session {} under nd7's policy; a sandbox the program applies itself is refused",
+            std::process::id()
+        );
+        let status = nd7_core::sandbox::spawn_with_profile(&policy.render_floor(), program, &[])
+            .args(args)
+            .status()?;
+        drop(session);
+        Ok(status)
+    }
+
+    /// Where `nd7-exec` is installed. The floor lets exactly this path out.
+    fn exit_path(home: &std::path::Path) -> PathBuf {
+        #[cfg(feature = "test-seams")]
+        if let Some(p) = env::var_os("ND7_EXIT") {
+            return PathBuf::from(p);
+        }
+        home.join(".nd7/bin/nd7-exec")
+    }
+
+    /// Where sessions are recorded. Must agree with `nd7-exec`, which derives
+    /// it from passwd; the override exists for the tests only.
+    fn sessions_root(home: &std::path::Path) -> PathBuf {
+        #[cfg(feature = "test-seams")]
+        if let Some(p) = env::var_os("ND7_SESSIONS_DIR") {
+            return PathBuf::from(p);
+        }
+        home.join(".nd7/sessions")
+    }
+
+    /// The exit binary is the one thing allowed out of the sandbox, so it
+    /// must exist and be writable by nobody but its owner.
+    fn trusted(exit: &std::path::Path) -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let meta = std::fs::metadata(exit)
+            .map_err(|e| format!("nd7-exec not found at {}: {e}", exit.display()))?;
+        if !meta.is_file() {
+            return Err(format!("{} is not a file", exit.display()).into());
+        }
+        for path in [exit, exit.parent().unwrap_or(exit)] {
+            let mode = std::fs::metadata(path)?.permissions().mode();
+            if mode & 0o022 != 0 {
+                return Err(format!(
+                    "{} is writable by group or others (mode {:o}); refusing to use it as the sandbox exit",
+                    path.display(),
+                    mode & 0o777
+                )
+                .into());
+            }
+        }
+        Ok(())
     }
 
     // `--profile` is ours only before the program: from the program on, every
@@ -202,7 +270,11 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
         return ExitCode::from(2);
     };
 
-    match spawn(profile, &program, args) {
+    let status = match profile {
+        Some(path) => spawn_raw(&path, &program, args),
+        None => spawn(&program, args),
+    };
+    match status {
         // No code means a signal killed it; report it as a shell would.
         Ok(status) => ExitCode::from(
             status
