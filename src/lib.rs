@@ -4,6 +4,10 @@
 //!
 //! - [`hook`]: Claude Code hook payload types, the nd7 event model, and the
 //!   transform between them. Pure; no I/O.
+//! - [`policy`]: what a session may do, rendered as the two Seatbelt
+//!   profiles that enforce it. Pure; no I/O.
+//! - [`session`]: the directory one `nd7 run` owns, where `nd7-exec` finds
+//!   the policy it applies to each command.
 //! - [`session_log`]: the append-only per-session log. The only module that knows
 //!   where events live on disk.
 //! - [`ship`]: `nd7 enroll` and `nd7 ship`, the machine's half of the vault
@@ -13,9 +17,11 @@
 //!   server share. Pure; no I/O.
 
 pub mod hook;
+pub mod policy;
 #[cfg(target_os = "macos")]
 pub mod sandbox;
 pub mod sbprofiles;
+pub mod session;
 pub mod session_log;
 pub mod ship;
 pub mod vault;
