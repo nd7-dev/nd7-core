@@ -68,3 +68,9 @@ pub fn spawn_with_profile(profile: &str, program: &str, params: &[(&str, &str)])
     }
     cmd
 }
+
+/// Applies `profile` to the calling process. Irreversible.
+pub fn apply_to_self(profile: &str) -> Result<(), String> {
+    let profile = CString::new(profile).map_err(|e| e.to_string())?;
+    apply(&profile, &[std::ptr::null()])
+}
