@@ -27,13 +27,13 @@ way you would to `zsh -c`. Claude Code's Bash tool adds this prefix through
 the hook that `nd7 run` installs; the command is otherwise denied by the
 outer sandbox.
 
-exit status: the command's; 2 for a usage error; 126 if the shell could not
-be executed.";
+exit status: the command's; 2 for a usage error; 126 if the command was not
+run: no nd7 session, no policy, the policy could not be applied, or the shell
+could not be executed.";
 
 fn main() -> ExitCode {
     let mut args = args().skip(1);
     let usage = || {
-        // A lambda function
         eprintln!("{USAGE}");
         ExitCode::from(2)
     };
@@ -50,42 +50,37 @@ fn run(cmd: &str) -> ExitCode {
     if confined() {
         return exec_shell(cmd);
     }
-    // Run the command in a Seatbelt sandboxed profile
-    // TODO: Implement the real sandboxing.
+    // Out of the outer sandbox now: the only way to a shell is through a
+    // successfully applied session policy.
     let home = match home() {
         Ok(p) => p,
-        Err(e) => {
-            eprintln!("{e}");
-            return ExitCode::FAILURE;
-        }
+        Err(e) => return refuse(&e.to_string()),
     };
     let sessions_dir = home.join(".nd7/sessions");
-    if let Some(session) = find_session(&sessions_dir) {
-        if let Some(policy) = policy(session) {
-            return exec_with_policy(&policy, cmd);
-        } else {
-            eprintln!("session has no sandbox policy")
-        } // If no policy found, block exec.
-    } else {
-        eprintln!("no session found for this sandbox env")
-    } // if no session found, block exec
-    ExitCode::FAILURE
+    let Some(session) = find_session(&sessions_dir) else {
+        return refuse("no nd7 session in this process's ancestry");
+    };
+    match policy(session) {
+        Some(policy) => exec_with_policy(&policy, cmd),
+        None => refuse("session has no policy.sb"),
+    }
+}
+
+/// The command is not run. Says why on stderr, with our name first so the
+/// reader can tell nd7 apart from the shell and from Claude Code.
+fn refuse(why: &str) -> ExitCode {
+    eprintln!("nd7-exec: {why}");
+    ExitCode::from(126)
 }
 
 fn exec_with_policy(policy: &Path, cmd: &str) -> ExitCode {
     let profile = match std::fs::read_to_string(policy) {
         Ok(p) => p,
-        Err(e) => {
-            eprintln!("failed to read profile: {e}");
-            return ExitCode::FAILURE;
-        }
+        Err(e) => return refuse(&format!("read {}: {e}", policy.display())),
     };
     match sandbox::apply_to_self(&profile) {
-        Ok(_) => exec_shell(cmd),
-        Err(e) => {
-            eprintln!("failed to exec sandboxed process {e}");
-            ExitCode::FAILURE
-        }
+        Ok(()) => exec_shell(cmd),
+        Err(e) => refuse(&format!("apply session policy: {e}")),
     }
 }
 
@@ -124,13 +119,11 @@ fn parent_of(pid: libc::pid_t) -> Option<libc::pid_t> {
             size,
         )
     };
-    // Returns either pbi_ppid or None
     (n == size).then_some(info.pbi_ppid as libc::pid_t)
 }
 
 fn policy(session: PathBuf) -> Option<PathBuf> {
     let policy_path = session.join("policy.sb");
-    // If policy_path exists, return it. If not, return None.
     policy_path.exists().then_some(policy_path)
 }
 
