@@ -10,6 +10,8 @@
 //!   that routes every Bash command through `nd7-exec`. macOS only.
 //! - `nd7 hook-prefix`: the PreToolUse hook `nd7 run` installs; rewrites a
 //!   Bash command to run through `nd7-exec`.
+//! - `nd7 allow <path>` / `nd7 deny <path>`: widen or narrow the running
+//!   session's policy; the next Bash command sees it, no restart.
 //!
 //! Plain blocking I/O; nothing here needs a runtime.
 //!
@@ -44,7 +46,10 @@ commands:
                              system-prompt note are added too. --profile <file> applies
                              that raw profile instead, with no session
   hook-prefix                the PreToolUse hook nd7 run installs: reads the payload on
-                             stdin, replies with the Bash command routed through nd7-exec";
+                             stdin, replies with the Bash command routed through nd7-exec
+  allow <path>               let the running session write under <path>, from the next
+                             command on; --session <pid> picks one when several run
+  deny <path>                take that grant back";
 
 /// What a clean verify does and does not prove. Printed with every success so
 /// nobody reads it as more than it is.
@@ -126,6 +131,16 @@ fn main() -> ExitCode {
         },
         Some("run") => run(args),
         Some("hook-prefix") => hook_prefix(),
+        Some(verb @ ("allow" | "deny")) => match grant(verb, args) {
+            Ok(msg) => {
+                println!("{msg}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("nd7 {verb}: {e}\nusage: nd7 {verb} [--session <pid>] <path>");
+                ExitCode::from(2)
+            }
+        },
         Some("-h" | "--help") => {
             println!("{USAGE}");
             ExitCode::SUCCESS
@@ -340,6 +355,74 @@ fn hook_prefix() -> ExitCode {
         Err(e) => eprintln!("nd7 hook-prefix: {e}"),
     }
     ExitCode::SUCCESS
+}
+
+/// `nd7 allow <path>` and `nd7 deny <path>`: add or remove a write root in a
+/// running session's policy. Only the record changes; `nd7-exec` reads it
+/// again for the next command, so no restart is involved. Refuses paths under
+/// `~/.nd7`, which no policy may ever make writable.
+fn grant(verb: &str, mut args: impl Iterator<Item = String>) -> Result<String> {
+    let (mut session, mut path) = (None, None);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--session" => {
+                session = Some(args.next().ok_or("--session needs a pid")?.parse::<u32>()?)
+            }
+            _ if path.is_none() => path = Some(arg),
+            other => return Err(format!("unexpected argument `{other}`").into()),
+        }
+    }
+    let path = std::fs::canonicalize(path.ok_or("no path given")?)?;
+    let root = nd7_core::session::sessions_root()?;
+    if path.starts_with(root.parent().unwrap_or(&root)) {
+        return Err("nd7's own records can never be made writable".into());
+    }
+    let pid = match session {
+        Some(pid) => pid,
+        None => {
+            let mut live: Vec<u32> = std::fs::read_dir(&root)?
+                .filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
+                .collect();
+            live.sort_unstable();
+            match live.as_slice() {
+                [one] => *one,
+                [] => return Err("no running nd7 session".into()),
+                many => {
+                    return Err(format!(
+                        "several sessions are running ({many:?}); pass --session <pid>"
+                    )
+                    .into());
+                }
+            }
+        }
+    };
+    let mut policy = nd7_core::session::load(&root, pid)?;
+    let changed = match verb {
+        "allow" if !policy.grants.contains(&path) => {
+            policy.grants.push(path.clone());
+            true
+        }
+        "deny" if policy.grants.contains(&path) => {
+            policy.grants.retain(|g| g != &path);
+            true
+        }
+        _ => false,
+    };
+    if changed {
+        nd7_core::session::write_policy_at(&root.join(pid.to_string()), &policy)?;
+    }
+    Ok(match (verb, changed) {
+        ("allow", true) => format!(
+            "session {pid}: writes under {} allowed from the next command",
+            path.display()
+        ),
+        ("allow", false) => format!("session {pid}: {} was already allowed", path.display()),
+        (_, true) => format!(
+            "session {pid}: writes under {} denied from the next command",
+            path.display()
+        ),
+        _ => format!("session {pid}: {} was not a grant", path.display()),
+    })
 }
 
 /// This binary, resolved: the hook command and the exit path are derived
