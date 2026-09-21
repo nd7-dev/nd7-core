@@ -248,3 +248,94 @@ fn caller_cwd_does_not_widen() {
 
     fs::remove_dir_all(&root).unwrap();
 }
+
+/// The real path, no `--profile`: `nd7 run` builds the policy from its cwd,
+/// creates the session, applies the rendered floor, and removes the session
+/// when the program exits. `ND7_EXIT` points the floor's exit at the freshly
+/// built binary and `ND7_SESSIONS_DIR` keeps the record out of `~/.nd7`.
+#[test]
+fn nd7_run_creates_the_session_and_applies_the_rendered_floor() {
+    let (root, proj, _floor) = setup("real-run");
+    let sessions = root.join("sessions");
+    // The rendered profiles allow the temp dir, where `root` lives, so a
+    // denied target has to be elsewhere: /private/tmp outside `claude-*`.
+    let outside = PathBuf::from(format!(
+        "/private/tmp/nd7-e2e-outside-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&outside);
+    fs::create_dir_all(&outside).unwrap();
+    // `setup` made a session for this process; the real run makes its own,
+    // named after `nd7 run`'s pid, which is what nd7-exec must find.
+    fs::remove_dir_all(sessions.join(std::process::id().to_string())).unwrap();
+
+    let script = format!(
+        r#"ls {sessions} | tr '\n' ' '; echo;
+           {EXEC} -c "echo hi > {proj}/via-exec && echo exec-ok";
+           {EXEC} -c "echo hi > {outside}/esc" 2>&1 | grep -o 'operation not permitted' | head -1;
+           echo hi > {outside}/direct"#,
+        sessions = sessions.display(),
+        proj = proj.display(),
+        outside = outside.display()
+    );
+    let out = Command::new(ND7)
+        .args(["run", "/bin/zsh", "-c", &script])
+        .current_dir(&proj)
+        .env("ND7_SESSIONS_DIR", &sessions)
+        .env("ND7_EXIT", EXEC)
+        .output()
+        .unwrap();
+    let stdout = stdout(&out);
+    let mut lines = stdout.lines();
+
+    // The session existed while the program ran, named after a pid that is
+    // not this test's.
+    let listed = lines.next().unwrap_or("").trim().to_owned();
+    assert!(
+        !listed.is_empty(),
+        "no session listed; stderr: {}",
+        stderr(&out)
+    );
+    assert_ne!(listed, std::process::id().to_string());
+    // A prefixed command got the policy: the project is writable.
+    assert_eq!(
+        lines.next(),
+        Some("exec-ok"),
+        "stdout: {stdout}\nstderr: {}",
+        stderr(&out)
+    );
+    assert_eq!(fs::read_to_string(proj.join("via-exec")).unwrap(), "hi\n");
+    // Outside the project is denied through nd7-exec (the policy) ...
+    assert_eq!(
+        lines.next(),
+        Some("operation not permitted"),
+        "stdout: {stdout}\nstderr: {}",
+        stderr(&out)
+    );
+    assert!(!outside.join("esc").exists());
+    // ... and directly (the floor). zsh reports a failed redirection on its
+    // own stderr before running the command, so it shows up there.
+    assert!(
+        stderr(&out).contains("operation not permitted: ") && stderr(&out).contains("/direct"),
+        "stderr: {}",
+        stderr(&out)
+    );
+    assert!(!outside.join("direct").exists());
+    assert!(
+        !out.status.success(),
+        "the last command failed, so the shell must too"
+    );
+    // And the session is gone once nd7 run returned.
+    assert!(
+        !sessions.join(&listed).exists(),
+        "session {listed} left behind"
+    );
+    assert!(
+        stderr(&out).contains("nd7 run: session"),
+        "stderr: {}",
+        stderr(&out)
+    );
+
+    fs::remove_dir_all(&root).unwrap();
+    fs::remove_dir_all(&outside).unwrap();
+}
