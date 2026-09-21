@@ -98,6 +98,24 @@ pub fn load(root: &Path, pid: u32) -> io::Result<Policy> {
     serde_json::from_str(&record).map_err(io::Error::other)
 }
 
+/// The user's home directory, from the passwd database. Never `$HOME`: the
+/// environment belongs to whoever started the process, and `nd7-exec` uses
+/// this to decide which policy to apply.
+pub fn home() -> io::Result<PathBuf> {
+    use std::{ffi::CStr, os::unix::ffi::OsStrExt};
+    let pw = unsafe { libc::getpwuid(libc::getuid()) };
+    if pw.is_null() {
+        return Err(io::Error::other("no passwd entry for the current user"));
+    }
+    let dir = unsafe { CStr::from_ptr((*pw).pw_dir) };
+    Ok(PathBuf::from(std::ffi::OsStr::from_bytes(dir.to_bytes())))
+}
+
+/// `~/.nd7/sessions`, with `~` from passwd.
+pub fn sessions_root() -> io::Result<PathBuf> {
+    Ok(home()?.join(".nd7/sessions"))
+}
+
 fn write_atomic(path: &Path, contents: &str) -> io::Result<()> {
     let mut name = path.as_os_str().to_owned();
     name.push(".tmp");
@@ -216,5 +234,31 @@ mod tests {
         assert_eq!(names(&root), [alive.as_str(), "not-a-pid"]);
 
         fs::remove_dir_all(&root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod passwd_tests {
+    use super::*;
+    use std::ffi::CStr;
+
+    #[test]
+    fn home_is_the_passwd_directory_of_this_user() {
+        let pw = unsafe { libc::getpwuid(libc::getuid()) };
+        assert!(!pw.is_null());
+        let name = unsafe { CStr::from_ptr((*pw).pw_name) }
+            .to_str()
+            .unwrap()
+            .to_owned();
+
+        let home = home().unwrap();
+        assert!(home.is_absolute(), "{}", home.display());
+        assert!(home.is_dir(), "{}", home.display());
+        assert!(
+            home.ends_with(&name),
+            "{} does not end with {name}",
+            home.display()
+        );
+        assert_eq!(sessions_root().unwrap(), home.join(".nd7/sessions"));
     }
 }

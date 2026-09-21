@@ -4,8 +4,8 @@
 
 use std::{
     env::args,
-    ffi::{CStr, OsStr, c_char, c_int, c_void},
-    os::unix::{ffi::OsStrExt, process::CommandExt},
+    ffi::{c_char, c_int, c_void},
+    os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Command, ExitCode},
 };
@@ -90,25 +90,15 @@ fn exec_with_policy(policy: &Path, cmd: &str) -> ExitCode {
 }
 
 /// Where the session records live. The environment is the caller's, and the
-/// caller is what we are defending against, so this is `$HOME/.nd7/sessions`
-/// with `$HOME` from passwd. `ND7_SESSIONS_DIR` is a test seam and is only
+/// caller is what we are defending against, so this is `~/.nd7/sessions`
+/// with `~` from passwd, via the library. `ND7_SESSIONS_DIR` is a test seam and is only
 /// compiled in under the `test-seams` feature, never in a release build.
 fn sessions_dir() -> Result<PathBuf> {
     #[cfg(feature = "test-seams")]
     if let Some(dir) = std::env::var_os("ND7_SESSIONS_DIR") {
         return Ok(PathBuf::from(dir));
     }
-    Ok(home()?.join(".nd7/sessions"))
-}
-
-fn home() -> Result<PathBuf> {
-    let pw = unsafe { libc::getpwuid(libc::getuid()) };
-    if pw.is_null() {
-        return Err("no passwd entry for current user".into());
-    }
-    let dir = unsafe { CStr::from_ptr((*pw).pw_dir) };
-    let path = PathBuf::from(OsStr::from_bytes(dir.to_bytes()));
-    Ok(path)
+    Ok(nd7_core::session::sessions_root()?)
 }
 
 fn find_session(sessions_dir: &Path) -> Option<PathBuf> {
@@ -239,24 +229,5 @@ mod tests {
         assert_eq!(policy(dir.clone()), Some(path));
 
         fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn home_is_the_passwd_directory_of_this_user() {
-        let pw = unsafe { libc::getpwuid(libc::getuid()) };
-        assert!(!pw.is_null());
-        let name = unsafe { CStr::from_ptr((*pw).pw_name) }
-            .to_str()
-            .unwrap()
-            .to_owned();
-
-        let home = home().unwrap();
-        assert!(home.is_absolute(), "{}", home.display());
-        assert!(home.is_dir(), "{}", home.display());
-        assert!(
-            home.ends_with(&name),
-            "{} does not end with {name}",
-            home.display()
-        );
     }
 }
