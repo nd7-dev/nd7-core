@@ -80,8 +80,9 @@ hook that routes Bash through `nd7-exec`, so `nd7 run` no longer passes it per
 invocation. Everything already in those files is kept, and running it again
 writes nothing; an agent with no directory of its own under `~` is skipped.
 `--project` writes `.claude/settings.json` in this directory instead (Claude
-Code only). Codex asks you to trust the new hooks the first time you start it
-afterwards.
+Code only). It also records Codex's approval of the hooks it wrote — the hash
+Codex stores when you accept them — so Codex does not ask about them at its
+next start.
 
 `nd7 init` also writes `~/.nd7/aliases.sh` —
 
@@ -123,8 +124,9 @@ process itself rather than an intermediate shell.
 }
 ```
 
-The same seven events go into `~/.codex/config.toml` as `[[hooks.<Event>]]`
-tables, where the command is one string, `nd7 record`.
+The same events go into `~/.codex/config.toml` as `[[hooks.<Event>]]` tables,
+where the command is one string, `nd7 record`; Codex has no
+`PostToolUseFailure`, so it gets the other six.
 
 </details>
 
