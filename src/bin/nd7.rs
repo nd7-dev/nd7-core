@@ -6,8 +6,9 @@
 //! - `nd7 enroll <server> <token>`: bind this machine to a vault.
 //! - `nd7 ship`: push unshipped frames to that vault.
 //! - `nd7 run [--profile <file>] <program> [args...]`: run a program under
-//!   nd7's sandbox: a session, the floor profile, and for `claude` the hook
-//!   that routes every Bash command through `nd7-exec`. macOS only.
+//!   nd7's sandbox: a session, the floor profile, and for `claude` and
+//!   `codex` the hook that routes every Bash command through `nd7-exec`.
+//!   macOS only.
 //! - `nd7 hook-prefix`: the PreToolUse hook `nd7 run` installs; rewrites a
 //!   Bash command to run through `nd7-exec`.
 //! - `nd7 allow <path>` / `nd7 deny <path>`: widen or narrow the running
@@ -42,9 +43,9 @@ commands:
                              --prune-after <duration> deletes fully shipped sessions.
                              Durations are like 30s, 5m, 2h, 30d. See docs/VAULT.md.
   run <program> [args...]    run a program under nd7's sandbox: a session is created and
-                             the floor profile applied; for claude, the Bash hook and the
-                             system-prompt note are added too. --profile <file> applies
-                             that raw profile instead, with no session
+                             the floor profile applied; for claude and codex, the Bash hook
+                             and the system-prompt note are added too. --profile <file>
+                             applies that raw profile instead, with no session
   hook-prefix                the PreToolUse hook nd7 run installs: reads the payload on
                              stdin, replies with the Bash command routed through nd7-exec
   allow <path>               let the running session write under <path>, from the next
@@ -227,34 +228,31 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
             std::process::id()
         );
         let mut cmd = nd7_core::sandbox::spawn_with_profile(&policy.render_floor(), program, &[]);
-        if std::path::Path::new(program)
-            .file_name()
-            .is_some_and(|n| n == "claude")
-        {
-            cmd.args(claude_flags()?);
+        let args: Vec<String> = args.collect();
+        match agent_of(program) {
+            Some(Agent::Claude) => {
+                cmd.args(claude_flags()?).args(&args);
+            }
+            Some(Agent::Codex) => {
+                // Codex applies a `-c` override to a subcommand only when it
+                // follows the subcommand: `codex -c hooks.… exec` accepts the
+                // flag and never runs the hook, `codex exec -c hooks.…` does
+                // (measured, 0.155.1). So the flags go after `exec` or
+                // `resume` when that is how codex was invoked, and first
+                // otherwise, for the TUI.
+                let (sub, rest) = match args.first().map(String::as_str) {
+                    Some("exec" | "e" | "resume") => (&args[..1], &args[1..]),
+                    _ => (&args[..0], &args[..]),
+                };
+                cmd.args(sub).args(codex_flags()?).args(rest);
+            }
+            None => {
+                cmd.args(&args);
+            }
         }
-        let status = cmd.args(args).status()?;
+        let status = cmd.status()?;
         drop(session);
         Ok(status)
-    }
-
-    /// What `claude` needs to work with the floor: its own sandbox off, since
-    /// the floor refuses any other profile anyway and the failure would cost
-    /// one broken tool call; the hook that routes every Bash command through
-    /// `nd7-exec`; and one line in the system prompt so a denial is read as
-    /// nd7's and not as Claude Code's own rules.
-    fn claude_flags() -> Result<Vec<String>> {
-        let hook = format!("{} hook-prefix", nd7_binary()?.display());
-        let settings = serde_json::json!({
-            "sandbox": { "enabled": false },
-            "hooks": { "PreToolUse": [ { "matcher": "Bash", "hooks": [ { "type": "command", "command": hook } ] } ] }
-        });
-        Ok(vec![
-            "--settings".to_owned(),
-            settings.to_string(),
-            "--append-system-prompt".to_owned(),
-            SYSTEM_PROMPT.to_owned(),
-        ])
     }
 
     /// Where sessions are recorded. Must agree with `nd7-exec`, which derives
@@ -290,14 +288,6 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
         Ok(())
     }
 
-    const SYSTEM_PROMPT: &str = "This session runs under nd7's kernel sandbox. Bash commands are \
-routed through nd7-exec by a hook and run under the session's policy: the project directory is \
-writable, most of the rest of the filesystem is not, and only HTTPS egress is open. An \
-'operation not permitted' error is that policy, not Claude Code's permission rules. Do not try \
-to route around it; tell the user what was denied. `nd7 allow <path>` widens the policy for \
-Bash commands from the next call on; the Write, Edit and Read tools see only the fixed policy, \
-so for those the user must restart under a wider one.";
-
     // `--profile` is ours only before the program: from the program on, every
     // argument is the child's, including the ones that look like options.
     let (mut profile, mut program) = (None, None);
@@ -332,6 +322,118 @@ so for those the user must restart under a wider one.";
         }
     }
 }
+
+/// An agent `nd7 run` starts with flags of its own.
+#[cfg(target_os = "macos")]
+#[derive(Debug, PartialEq, Eq)]
+enum Agent {
+    Claude,
+    Codex,
+}
+
+/// Which agent `program` names, if it names one. `program` is resolved the
+/// way `Command` will resolve it — as a path when it contains a `/`, on PATH
+/// otherwise — and then canonicalized, because an installed agent is often a
+/// chain of symlinks (`~/.local/bin/codex` is two hops from the real file) and
+/// a shim under another name is common. If nothing resolves, the name as given
+/// is all there is to go on.
+#[cfg(target_os = "macos")]
+fn agent_of(program: &str) -> Option<Agent> {
+    let given = std::path::Path::new(program);
+    let resolved = if program.contains('/') {
+        given.canonicalize().ok()
+    } else {
+        let path = env::var_os("PATH").unwrap_or_default();
+        env::split_paths(&path).find_map(|dir| dir.join(program).canonicalize().ok())
+    };
+    match resolved.as_deref().unwrap_or(given).file_name()?.to_str()? {
+        "claude" => Some(Agent::Claude),
+        "codex" => Some(Agent::Codex),
+        _ => None,
+    }
+}
+
+/// What `claude` needs to work with the floor: its own sandbox off, since
+/// the floor refuses any other profile anyway and the failure would cost
+/// one broken tool call; the hook that routes every Bash command through
+/// `nd7-exec`; and one line in the system prompt so a denial is read as
+/// nd7's and not as Claude Code's own rules.
+#[cfg(target_os = "macos")]
+fn claude_flags() -> Result<Vec<String>> {
+    let hook = format!("{} hook-prefix", nd7_binary()?.display());
+    let settings = serde_json::json!({
+        "sandbox": { "enabled": false },
+        "hooks": { "PreToolUse": [ { "matcher": "Bash", "hooks": [ { "type": "command", "command": hook } ] } ] }
+    });
+    Ok(vec![
+        "--settings".to_owned(),
+        settings.to_string(),
+        "--append-system-prompt".to_owned(),
+        SYSTEM_PROMPT.to_owned(),
+    ])
+}
+
+/// The same three things for `codex`, in its own spelling.
+/// `-s danger-full-access` keeps it from applying its own Seatbelt profile,
+/// which the kernel refuses under the floor anyway; unlike
+/// `--dangerously-bypass-approvals-and-sandbox` it leaves `approval_policy`
+/// alone, so the TUI still asks before it runs a command.
+/// `--dangerously-bypass-hook-trust` is what lets a hook given with `-c` run
+/// at all: only hooks discovered from a config file carry the trust hash Codex
+/// checks. And `developer_instructions` is Codex's `--append-system-prompt`.
+///
+/// `-c approval_policy="never"` is deliberately not here: an interactive user
+/// should keep the approvals. `codex exec` runs unattended, so add it there.
+#[cfg(target_os = "macos")]
+fn codex_flags() -> Result<Vec<String>> {
+    let hook = toml_string(&format!("{} hook-prefix", nd7_binary()?.display()));
+    Ok(vec![
+        "-s".to_owned(),
+        "danger-full-access".to_owned(),
+        "--dangerously-bypass-hook-trust".to_owned(),
+        "-c".to_owned(),
+        format!(
+            r#"hooks.PreToolUse=[{{matcher="", hooks=[{{type="command", command={hook}, timeout=30}}]}}]"#
+        ),
+        "-c".to_owned(),
+        format!("developer_instructions={}", toml_string(SYSTEM_PROMPT)),
+    ])
+}
+
+/// `s` as a TOML basic string: wrapped in `"`, with `\` and `"` escaped and
+/// every control character written as an escape. Codex parses each `-c`
+/// override as TOML, so this is the one place a value nd7 passes it is quoted.
+#[cfg(target_os = "macos")]
+fn toml_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str(r"\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str(r"\n"),
+            '\r' => out.push_str(r"\r"),
+            '\t' => out.push_str(r"\t"),
+            '\u{8}' => out.push_str(r"\b"),
+            '\u{c}' => out.push_str(r"\f"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// The note both agents get: a denial under nd7 is the policy, not the
+/// agent's own permission rules, and `nd7 allow` is how it is widened.
+#[cfg(target_os = "macos")]
+const SYSTEM_PROMPT: &str = "This session runs under nd7's kernel sandbox. Bash commands are \
+routed through nd7-exec by a hook and run under the session's policy: the project directory is \
+writable, most of the rest of the filesystem is not, and only HTTPS egress is open. An \
+'operation not permitted' error is that policy, not the agent's own permission rules. Do not try \
+to route around it; tell the user what was denied. `nd7 allow <path>` widens the policy for \
+Bash commands from the next call on; file-editing tools (Write, Edit, apply_patch) and Read see \
+only the fixed policy, so for those the user must restart under a wider one.";
 
 /// `nd7 hook-prefix`: Claude Code's PreToolUse hook. Reads the payload on
 /// stdin and, for a Bash command, replies with the same command routed through
@@ -487,4 +589,53 @@ fn parse_duration(s: &str) -> Result<Duration> {
         .checked_mul(unit)
         .ok_or(format!("duration `{s}`: too long"))?;
     Ok(Duration::from_secs(seconds))
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// The name is resolved the way `Command` resolves it, so a symlink chain
+    /// and a shim under another name both land on the agent they really are.
+    #[test]
+    fn agent_of_follows_path_and_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = env::temp_dir().join(format!("nd7-agent-of-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(root.join("releases/1.2.3/bin")).unwrap();
+        fs::write(root.join("releases/1.2.3/bin/codex"), "").unwrap();
+        fs::write(bin.join("claude"), "").unwrap();
+        // As codex is installed: bin/codex -> current/bin/codex -> releases/…
+        symlink(root.join("releases/1.2.3"), root.join("current")).unwrap();
+        symlink(root.join("current/bin/codex"), bin.join("codex")).unwrap();
+        symlink(bin.join("claude"), bin.join("my-agent")).unwrap();
+
+        // SAFETY: the one test in this binary that touches the environment.
+        unsafe { env::set_var("PATH", &bin) };
+
+        assert_eq!(agent_of("codex"), Some(Agent::Codex));
+        assert_eq!(agent_of("my-agent"), Some(Agent::Claude));
+        assert_eq!(
+            agent_of(bin.join("codex").to_str().unwrap()),
+            Some(Agent::Codex)
+        );
+        assert_eq!(agent_of("zsh"), None);
+        // Nothing to resolve: the name as given is all there is.
+        assert_eq!(agent_of("/nowhere/claude"), Some(Agent::Claude));
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn toml_strings_are_quoted_and_escaped() {
+        assert_eq!(toml_string("plain"), r#""plain""#);
+        assert_eq!(toml_string(r#"a "b" c"#), r#""a \"b\" c""#);
+        assert_eq!(toml_string(r"back\slash"), r#""back\\slash""#);
+        assert_eq!(toml_string("one\ntwo\ttab"), r#""one\ntwo\ttab""#);
+        assert_eq!(toml_string("\u{1}"), r#""\u0001""#);
+    }
 }

@@ -24,6 +24,12 @@
 //!   in its transcript and copy it into the next call, and another hook may
 //!   have prefixed it already; a command that is already prefixed is left
 //!   alone rather than wrapped twice.
+//!
+//! Codex CLI (0.155.1) sends the same payload, takes the same reply and calls
+//! its shell tool `Bash` too, so this serves both agents unchanged
+//! (`docs/spikes/2026-09-22-E-codex.md`); its `apply_patch` is a `tool_name`
+//! of its own and is deliberately not rewritten, because it runs inside the
+//! codex process, where only the floor applies.
 
 use std::path::Path;
 
