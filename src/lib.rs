@@ -2,6 +2,8 @@
 //!
 //! This library holds everything the binaries share:
 //!
+//! - [`agent_config`]: `nd7 init`: nd7's hooks in an agent's own
+//!   configuration, and the shell aliases that start it under `nd7 run`.
 //! - [`hook`]: Claude Code hook payload types, the nd7 event model, and the
 //!   transform between them. Pure; no I/O.
 //! - [`hook_prefix`]: the `PreToolUse` reply that routes Claude Code's Bash
@@ -18,6 +20,7 @@
 //! - [`vault`]: the wire format and cryptography the machine and the vault
 //!   server share. Pure; no I/O.
 
+pub mod agent_config;
 pub mod hook;
 pub mod hook_prefix;
 pub mod policy;
