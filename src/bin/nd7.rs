@@ -9,8 +9,11 @@
 //!   nd7's sandbox: a session, the floor profile, and for `claude` and
 //!   `codex` the hook that routes every Bash command through `nd7-exec`.
 //!   macOS only.
+//! - `nd7 init [claude|codex]`: write nd7's hooks into the agent's own
+//!   configuration, and the shell aliases that start it under `nd7 run`, so
+//!   `nd7 run` no longer has to pass the hooks per invocation.
 //! - `nd7 hook-prefix`: the PreToolUse hook `nd7 run` installs; rewrites a
-//!   Bash command to run through `nd7-exec`.
+//!   Bash command to run through `nd7-exec`. Silent outside a session.
 //! - `nd7 allow <path>` / `nd7 deny <path>`: widen or narrow the running
 //!   session's policy; the next Bash command sees it, no restart.
 //!
@@ -26,6 +29,7 @@ use std::{
 };
 
 use nd7_core::{
+    agent_config::{self, Agent, Changed},
     hook::{Event, HookInput, Invocation},
     session_log::{ChainError, Report, SessionLog},
     ship,
@@ -46,6 +50,11 @@ commands:
                              the floor profile applied; for claude and codex, the Bash hook
                              and the system-prompt note are added too. --profile <file>
                              applies that raw profile instead, with no session
+  init [claude|codex]        write nd7's hooks into the agent's own configuration, once,
+                             and shell aliases that start it under nd7 run. No agent
+                             named: both, skipping one that is not installed. --global
+                             (the default) writes under ~; --project writes .claude in
+                             this directory; --no-alias leaves the shell alone
   hook-prefix                the PreToolUse hook nd7 run installs: reads the payload on
                              stdin, replies with the Bash command routed through nd7-exec
   allow <path>               let the running session write under <path>, from the next
@@ -131,6 +140,7 @@ fn main() -> ExitCode {
             }
         },
         Some("run") => run(args),
+        Some("init") => init(args),
         Some("hook-prefix") => hook_prefix(),
         Some(verb @ ("allow" | "deny")) => match grant(verb, args) {
             Ok(msg) => {
@@ -223,15 +233,25 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
         };
         trusted(&policy.exit)?;
         let session = Session::create(&sessions_root(&policy.home), &policy)?;
+        let nd7 = nd7_binary()?;
+        let agent = agent_of(program);
         eprintln!(
-            "nd7 run: session {} under nd7's policy; a sandbox the program applies itself is refused",
-            std::process::id()
+            "nd7 run: session {} under nd7's policy; a sandbox the program applies itself is refused{}",
+            std::process::id(),
+            match agent {
+                Some(agent) if installed(agent, &policy.home, &nd7) => " (hooks: installed)",
+                Some(_) => " (hooks: per-invocation; run `nd7 init` to install them)",
+                None => "",
+            }
         );
         let mut cmd = nd7_core::sandbox::spawn_with_profile(&policy.render_floor(), program, &[]);
+        // The hook nd7 installs runs for every session the agent starts, so it
+        // needs to know which of them are nd7's.
+        cmd.env("ND7_SESSION", std::process::id().to_string());
         let args: Vec<String> = args.collect();
-        match agent_of(program) {
+        match agent {
             Some(Agent::Claude) => {
-                cmd.args(claude_flags()?).args(&args);
+                cmd.args(claude_flags(&policy.home, &nd7)).args(&args);
             }
             Some(Agent::Codex) => {
                 // Codex applies a `-c` override to a subcommand only when it
@@ -244,7 +264,9 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
                     Some("exec" | "e" | "resume") => (&args[..1], &args[1..]),
                     _ => (&args[..0], &args[..]),
                 };
-                cmd.args(sub).args(codex_flags()?).args(rest);
+                cmd.args(sub)
+                    .args(codex_flags(&policy.home, &nd7))
+                    .args(rest);
             }
             None => {
                 cmd.args(&args);
@@ -323,54 +345,64 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
     }
 }
 
-/// An agent `nd7 run` starts with flags of its own.
-#[cfg(target_os = "macos")]
-#[derive(Debug, PartialEq, Eq)]
-enum Agent {
-    Claude,
-    Codex,
-}
-
-/// Which agent `program` names, if it names one. `program` is resolved the
-/// way `Command` will resolve it — as a path when it contains a `/`, on PATH
-/// otherwise — and then canonicalized, because an installed agent is often a
-/// chain of symlinks (`~/.local/bin/codex` is two hops from the real file) and
-/// a shim under another name is common. If nothing resolves, the name as given
-/// is all there is to go on.
-#[cfg(target_os = "macos")]
-fn agent_of(program: &str) -> Option<Agent> {
-    let given = std::path::Path::new(program);
-    let resolved = if program.contains('/') {
-        given.canonicalize().ok()
+/// `program` resolved the way `Command` will resolve it — as a path when it
+/// contains a `/`, on PATH otherwise — and then canonicalized, because an
+/// installed agent is often a chain of symlinks (`~/.local/bin/codex` is two
+/// hops from the real file).
+fn resolve(program: &str) -> Option<std::path::PathBuf> {
+    if program.contains('/') {
+        std::path::Path::new(program).canonicalize().ok()
     } else {
         let path = env::var_os("PATH").unwrap_or_default();
         env::split_paths(&path).find_map(|dir| dir.join(program).canonicalize().ok())
-    };
-    match resolved.as_deref().unwrap_or(given).file_name()?.to_str()? {
+    }
+}
+
+/// Which agent `program` names, if it names one. A shim under another name is
+/// common, so the resolved file's name decides; if nothing resolves, the name
+/// as given is all there is to go on.
+#[cfg(target_os = "macos")]
+fn agent_of(program: &str) -> Option<Agent> {
+    let resolved = resolve(program);
+    let name = resolved.as_deref().unwrap_or(std::path::Path::new(program));
+    match name.file_name()?.to_str()? {
         "claude" => Some(Agent::Claude),
         "codex" => Some(Agent::Codex),
         _ => None,
     }
 }
 
+/// Whether this agent's own configuration already runs this nd7 as its
+/// `PreToolUse` hook, in which case the flags leave the hook out.
+#[cfg(target_os = "macos")]
+fn installed(agent: Agent, home: &std::path::Path, nd7: &std::path::Path) -> bool {
+    match agent {
+        Agent::Claude => agent_config::claude_has_hook(&home.join(".claude/settings.json"), nd7),
+        Agent::Codex => agent_config::codex_has_hook(&home.join(".codex/config.toml"), nd7),
+    }
+}
+
 /// What `claude` needs to work with the floor: its own sandbox off, since
 /// the floor refuses any other profile anyway and the failure would cost
 /// one broken tool call; the hook that routes every Bash command through
-/// `nd7-exec`; and one line in the system prompt so a denial is read as
-/// nd7's and not as Claude Code's own rules.
+/// `nd7-exec`, unless `nd7 init` has already put it in the settings; and one
+/// line in the system prompt so a denial is read as nd7's and not as Claude
+/// Code's own rules.
 #[cfg(target_os = "macos")]
-fn claude_flags() -> Result<Vec<String>> {
-    let hook = format!("{} hook-prefix", nd7_binary()?.display());
-    let settings = serde_json::json!({
-        "sandbox": { "enabled": false },
-        "hooks": { "PreToolUse": [ { "matcher": "Bash", "hooks": [ { "type": "command", "command": hook } ] } ] }
-    });
-    Ok(vec![
+fn claude_flags(home: &std::path::Path, nd7: &std::path::Path) -> Vec<String> {
+    let mut settings = serde_json::json!({ "sandbox": { "enabled": false } });
+    if !installed(Agent::Claude, home, nd7) {
+        let hook = format!("{} hook-prefix", nd7.display());
+        settings["hooks"] = serde_json::json!({
+            "PreToolUse": [ { "matcher": "Bash", "hooks": [ { "type": "command", "command": hook } ] } ]
+        });
+    }
+    vec![
         "--settings".to_owned(),
         settings.to_string(),
         "--append-system-prompt".to_owned(),
         SYSTEM_PROMPT.to_owned(),
-    ])
+    ]
 }
 
 /// The same three things for `codex`, in its own spelling.
@@ -380,48 +412,29 @@ fn claude_flags() -> Result<Vec<String>> {
 /// alone, so the TUI still asks before it runs a command.
 /// `--dangerously-bypass-hook-trust` is what lets a hook given with `-c` run
 /// at all: only hooks discovered from a config file carry the trust hash Codex
-/// checks. And `developer_instructions` is Codex's `--append-system-prompt`.
+/// checks — which is why an installed hook needs neither that flag nor the
+/// warning it prints at every start. And `developer_instructions` is Codex's
+/// `--append-system-prompt`.
 ///
 /// `-c approval_policy="never"` is deliberately not here: an interactive user
 /// should keep the approvals. `codex exec` runs unattended, so add it there.
 #[cfg(target_os = "macos")]
-fn codex_flags() -> Result<Vec<String>> {
-    let hook = toml_string(&format!("{} hook-prefix", nd7_binary()?.display()));
-    Ok(vec![
-        "-s".to_owned(),
-        "danger-full-access".to_owned(),
-        "--dangerously-bypass-hook-trust".to_owned(),
-        "-c".to_owned(),
-        format!(
+fn codex_flags(home: &std::path::Path, nd7: &std::path::Path) -> Vec<String> {
+    let mut flags = vec!["-s".to_owned(), "danger-full-access".to_owned()];
+    if !installed(Agent::Codex, home, nd7) {
+        let hook = agent_config::toml_string(&format!("{} hook-prefix", nd7.display()));
+        flags.push("--dangerously-bypass-hook-trust".to_owned());
+        flags.push("-c".to_owned());
+        flags.push(format!(
             r#"hooks.PreToolUse=[{{matcher="", hooks=[{{type="command", command={hook}, timeout=30}}]}}]"#
-        ),
-        "-c".to_owned(),
-        format!("developer_instructions={}", toml_string(SYSTEM_PROMPT)),
-    ])
-}
-
-/// `s` as a TOML basic string: wrapped in `"`, with `\` and `"` escaped and
-/// every control character written as an escape. Codex parses each `-c`
-/// override as TOML, so this is the one place a value nd7 passes it is quoted.
-#[cfg(target_os = "macos")]
-fn toml_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '\\' => out.push_str(r"\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str(r"\n"),
-            '\r' => out.push_str(r"\r"),
-            '\t' => out.push_str(r"\t"),
-            '\u{8}' => out.push_str(r"\b"),
-            '\u{c}' => out.push_str(r"\f"),
-            c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
-            c => out.push(c),
-        }
+        ));
     }
-    out.push('"');
-    out
+    flags.push("-c".to_owned());
+    flags.push(format!(
+        "developer_instructions={}",
+        agent_config::toml_string(SYSTEM_PROMPT)
+    ));
+    flags
 }
 
 /// The note both agents get: a denial under nd7 is the policy, not the
@@ -441,6 +454,13 @@ only the fixed policy, so for those the user must restart under a wider one.";
 /// is empty: the command then runs unprefixed, where the floor denies it, so
 /// a failing hook can only make things stricter.
 fn hook_prefix() -> ExitCode {
+    // `nd7 init` leaves the hook in the agent's configuration for good, so it
+    // also fires for sessions nd7 did not start. There is no session then, and
+    // `nd7-exec` would refuse every command it was handed, so the hook says
+    // nothing and the agent runs the command itself.
+    if env::var_os("ND7_SESSION").is_none() {
+        return ExitCode::SUCCESS;
+    }
     let mut payload = String::new();
     if let Err(e) = io::stdin().read_to_string(&mut payload) {
         eprintln!("nd7 hook-prefix: {e}");
@@ -459,6 +479,131 @@ fn hook_prefix() -> ExitCode {
         Err(e) => eprintln!("nd7 hook-prefix: {e}"),
     }
     ExitCode::SUCCESS
+}
+
+/// `nd7 init [claude|codex] [--global|--project] [--no-alias]`: write nd7's
+/// hooks into the agents' own configuration, and the aliases that start them
+/// under `nd7 run`. Everything it writes is idempotent, so running it again
+/// after an upgrade is safe.
+fn init(args: impl Iterator<Item = String>) -> ExitCode {
+    match init_agents(args) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!(
+                "nd7 init: {e}\nusage: nd7 init [claude|codex] [--global|--project] [--no-alias]"
+            );
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn init_agents(args: impl Iterator<Item = String>) -> Result<()> {
+    let (mut named, mut project, mut aliases) = (None, false, true);
+    for arg in args {
+        match arg.as_str() {
+            "claude" => named = Some(Agent::Claude),
+            "codex" => named = Some(Agent::Codex),
+            "--global" => project = false,
+            "--project" => project = true,
+            "--no-alias" => aliases = false,
+            other => return Err(format!("unexpected argument `{other}`").into()),
+        }
+    }
+
+    let home = nd7_core::session::home()?;
+    let nd7 = nd7_binary()?;
+    let agents: Vec<Agent> = match named {
+        Some(agent) => vec![agent],
+        // Both, except an agent that has never run on this machine: there is
+        // no configuration of its own to write into.
+        None => {
+            let mut both = Vec::new();
+            for agent in [Agent::Claude, Agent::Codex] {
+                let dir = home.join(format!(".{agent}"));
+                if dir.is_dir() {
+                    both.push(agent);
+                } else {
+                    println!("{agent}: no {}; skipped", dir.display());
+                }
+            }
+            both
+        }
+    };
+
+    let root = if project {
+        env::current_dir()?
+    } else {
+        home.clone()
+    };
+    for &agent in &agents {
+        let (path, changed) = match agent {
+            Agent::Claude => {
+                let path = root.join(".claude/settings.json");
+                let changed = agent_config::install_claude(&path, &nd7)?;
+                (path, changed)
+            }
+            // Codex reads project-level hooks from `.codex/hooks.json`,
+            // whose shape nd7 has not verified; `--global` is the one form it
+            // writes.
+            Agent::Codex if project => {
+                println!("codex: project-level hooks not supported by nd7 init yet; use --global");
+                continue;
+            }
+            Agent::Codex => {
+                let path = root.join(".codex/config.toml");
+                let changed = agent_config::install_codex(&path, &nd7)?;
+                (path, changed)
+            }
+        };
+        println!(
+            "{agent}: hooks {} in {}",
+            match changed {
+                Changed::Installed => "installed",
+                Changed::AlreadyInstalled => "already installed",
+            },
+            path.display()
+        );
+        if agent == Agent::Codex {
+            println!(
+                "note: Codex asks you to trust newly configured hooks the first time you start it."
+            );
+        }
+    }
+
+    if aliases {
+        let mut on_path = Vec::new();
+        for &agent in &agents {
+            if resolve(agent.name()).is_some() {
+                on_path.push(agent);
+            } else {
+                println!("{agent}: not on PATH; no alias written");
+            }
+        }
+        if !on_path.is_empty() {
+            let lines = agent_config::install_aliases(&home, &on_path)?;
+            println!(
+                "aliases: {} ({})",
+                home.join(".nd7/aliases.sh").display(),
+                lines.join("; ")
+            );
+            // zsh is macOS's login shell, so its rc is created if it is
+            // missing; bash's is only added to when the user has one.
+            let bashrc = home.join(".bashrc");
+            for rc in [home.join(".zshrc")]
+                .into_iter()
+                .chain(bashrc.is_file().then_some(bashrc))
+            {
+                let added = agent_config::source_aliases(&rc)?;
+                println!(
+                    "{}: {} them",
+                    rc.display(),
+                    if added { "now loads" } else { "already loads" }
+                );
+            }
+            println!("restart your shell or run: source ~/.nd7/aliases.sh");
+        }
+    }
+    Ok(())
 }
 
 /// `nd7 allow <path>` and `nd7 deny <path>`: add or remove a write root in a
@@ -630,12 +775,38 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
     }
 
+    /// Both agents' flags carry the hook only while it is not in their own
+    /// configuration; what makes them work with the floor stays either way.
     #[test]
-    fn toml_strings_are_quoted_and_escaped() {
-        assert_eq!(toml_string("plain"), r#""plain""#);
-        assert_eq!(toml_string(r#"a "b" c"#), r#""a \"b\" c""#);
-        assert_eq!(toml_string(r"back\slash"), r#""back\\slash""#);
-        assert_eq!(toml_string("one\ntwo\ttab"), r#""one\ntwo\ttab""#);
-        assert_eq!(toml_string("\u{1}"), r#""\u0001""#);
+    fn flags_leave_out_a_hook_the_agent_already_has() {
+        let home = env::temp_dir().join(format!("nd7-flags-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+        let nd7 = home.join("nd7");
+
+        let claude = claude_flags(&home, &nd7);
+        assert!(claude.join(" ").contains("hook-prefix"));
+        assert!(claude.contains(&"--append-system-prompt".to_owned()));
+        let codex = codex_flags(&home, &nd7);
+        assert!(codex.join(" ").contains("hook-prefix"));
+        assert!(codex.contains(&"--dangerously-bypass-hook-trust".to_owned()));
+
+        nd7_core::agent_config::install_claude(&home.join(".claude/settings.json"), &nd7).unwrap();
+        nd7_core::agent_config::install_codex(&home.join(".codex/config.toml"), &nd7).unwrap();
+
+        let claude = claude_flags(&home, &nd7);
+        assert!(!claude.join(" ").contains("hook-prefix"));
+        assert!(
+            claude
+                .join(" ")
+                .contains(r#"{"sandbox":{"enabled":false}}"#)
+        );
+        let codex = codex_flags(&home, &nd7);
+        assert!(!codex.join(" ").contains("hook-prefix"));
+        assert!(!codex.contains(&"--dangerously-bypass-hook-trust".to_owned()));
+        assert!(codex.join(" ").contains("developer_instructions="));
+        assert!(codex.contains(&"danger-full-access".to_owned()));
+
+        fs::remove_dir_all(&home).unwrap();
     }
 }
