@@ -2,6 +2,10 @@
 name = "nd7-core"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+description = "Kernel sandbox and tamper-evident audit log for AI coding agents"
+repository = "https://github.com/nd7-dev/nd7-core"
+homepage = "https://nd7.dev"
 
 # Shared code lives in the library (src/lib.rs). Every binary target below
 # links it; add further tools as more [[bin]] entries.
