@@ -95,7 +95,7 @@ agent still needs four things measured and wired, in this order:
 | agent | status |
 |---|---|
 | Claude Code | all four done: ADR-0007, `nd7 run claude` |
-| OpenAI Codex CLI | spike planned; uses Seatbelt itself on macOS, so the veto applies |
+| OpenAI Codex CLI | all four done: `nd7 run codex` (spike E) |
 | Google Antigravity | to check |
 | OpenCode | to check |
 | others (Gemini CLI, Cursor agent, Aider, …) | as demand appears |

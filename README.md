@@ -81,14 +81,28 @@ every process it spawns, then starts it with the flags it needs: a
 sandbox turned off (the kernel refuses a second profile anyway), and one
 paragraph in the system prompt so a denial is reported as nd7's policy rather
 than as Claude Code's permission rules. Nothing in your Claude Code settings
-changes; the flags apply to that session only. Any other program works the
-same way, `nd7 run zsh` for instance, without the Claude-specific flags.
+changes; the flags apply to that session only.
+
+```sh
+nd7 run codex
+```
+
+The same setup for Codex CLI: its own Seatbelt sandbox off with
+`-s danger-full-access` (the kernel refuses a second profile anyway, and this
+leaves Codex's approval prompts alone), the same `PreToolUse` hook, passed per
+invocation with `--dangerously-bypass-hook-trust`, and the same note as
+`developer_instructions`. For an unattended `codex exec`, add
+`-c approval_policy="never"` yourself; interactively, Codex keeps asking as it
+normally does.
+
+Any other program works the same way, `nd7 run zsh` for instance, without the
+agent-specific flags.
 
 What the session may do, from the start:
 
 | | allowed |
 |---|---|
-| write | the project directory, the temp dir, `~/.claude`, Claude Code's scratch under `/private/tmp/claude-*` |
+| write | the project directory, the temp dir, `~/.claude`, `~/.codex`, Claude Code's scratch under `/private/tmp/claude-*` |
 | read | everything except `~/.ssh`, `~/.aws` and `~/.nd7` |
 | network | HTTPS (port 443) and DNS. `git` over HTTPS works; over SSH it does not |
 | run | anything, inside the same boundary |
@@ -118,8 +132,11 @@ under [docs/spikes/](docs/spikes/).
 
 Known limits: Write and Edit run inside the `claude` process, so `nd7 allow`
 widens Bash but not those tools (restart `nd7 run claude --resume <id>` for
-that); `ps` and `pgrep` are denied; Seatbelt filters network by port, not
-hostname; Linux is Tier 2 and not yet built.
+that), and Codex's `apply_patch` sees only the floor in the same way; on a
+machine whose Codex policy sets `allow_managed_hooks_only`, the per-invocation
+hook is refused and Codex runs under the floor alone; `ps` and `pgrep` are
+denied; Seatbelt filters network by port, not hostname; Linux is Tier 2 and
+not yet built.
 
 Register the hook in your Claude Code settings (`~/.claude/settings.json` for
 all projects, or `.claude/settings.json` in a project). Use **exec form**

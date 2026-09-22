@@ -360,3 +360,14 @@ cannot forge.
 - Must revisit if Apple removes `no-sandbox`, if Claude Code stops honouring
   `PreToolUse` `updatedInput`, or when recorded sessions give an exec
   allowlist for the floor.
+
+#### Addendum 2026-09-22: Codex
+Codex CLI 0.155.1 needed no second mechanism: its hook payload and reply are
+Claude Code's, and its shell tool is `Bash`, so `nd7 hook-prefix` and the
+trampoline serve it unchanged. Four things were added: `~/.codex` as a write
+root (without it Codex cannot start), `-s danger-full-access` so it does not
+apply its own Seatbelt profile, `--dangerously-bypass-hook-trust` because a
+hook given with `-c` carries no trust hash, and `developer_instructions` as
+the `--append-system-prompt` analogue. A second trailing deny now keeps both
+agents' configuration files unwritable, so a session cannot change what the
+next one starts with. Measurements: `docs/spikes/2026-09-22-E-codex.md`.
