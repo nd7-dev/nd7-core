@@ -1,6 +1,6 @@
 # nd7
 
-A kernel sandbox and tamper-evident audit log for AI coding agents. `nd7` records what an agent did during a
+A kernel sandbox and secure audit log for AI coding agents. `nd7` records what an agent did during a
 session (first what it *intended* to do, later what *actually happened* on the
 machine) in a compact, append-only, hash-chained log that a human can read
 afterwards and that tooling can act on. The engine is open source; the log
