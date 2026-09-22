@@ -2,23 +2,36 @@
 //! sandbox. It applies the current session policy to itself and becomes the
 //! shell that runs the command. It never writes anything.
 
+use std::process::ExitCode;
+
+#[cfg(target_os = "macos")]
 use std::{
     env::args,
     ffi::{c_char, c_int, c_void},
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
-    process::{Command, ExitCode},
+    process::Command,
 };
 
+#[cfg(target_os = "macos")]
 use nd7_core::sandbox;
 
+#[cfg(target_os = "macos")]
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+#[cfg(not(target_os = "macos"))]
+fn main() -> ExitCode {
+    eprintln!("nd7-exec: only supported on macOS");
+    ExitCode::from(2)
+}
+
+#[cfg(target_os = "macos")]
 #[link(name = "sandbox")]
 unsafe extern "C" {
     fn sandbox_check(pid: libc::pid_t, operation: *const c_char, r#type: c_int, ...) -> c_int;
 }
 
+#[cfg(target_os = "macos")]
 const USAGE: &str = "usage: nd7-exec -c <command>
 
 Runs <command> with /bin/zsh -c under the nd7 policy of the session this
@@ -31,6 +44,7 @@ exit status: the command's; 2 for a usage error; 126 if the command was not
 run: no nd7 session, no policy, the policy could not be applied, or the shell
 could not be executed.";
 
+#[cfg(target_os = "macos")]
 fn main() -> ExitCode {
     match parse_args(args().skip(1)) {
         Some(cmd) => run(&cmd),
@@ -41,6 +55,7 @@ fn main() -> ExitCode {
     }
 }
 
+#[cfg(target_os = "macos")]
 /// Exactly `-c <command>`, and nothing else.
 fn parse_args(mut args: impl Iterator<Item = String>) -> Option<String> {
     match args.next().as_deref() {
@@ -52,6 +67,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Option<String> {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn run(cmd: &str) -> ExitCode {
     if confined() {
         return exec_shell(cmd);
@@ -71,6 +87,7 @@ fn run(cmd: &str) -> ExitCode {
     }
 }
 
+#[cfg(target_os = "macos")]
 /// The command is not run. Says why on stderr, with our name first so the
 /// reader can tell nd7 apart from the shell and from Claude Code.
 fn refuse(why: &str) -> ExitCode {
@@ -78,6 +95,7 @@ fn refuse(why: &str) -> ExitCode {
     ExitCode::from(126)
 }
 
+#[cfg(target_os = "macos")]
 fn exec_with_policy(policy: &Path, cmd: &str) -> ExitCode {
     let profile = match std::fs::read_to_string(policy) {
         Ok(p) => p,
@@ -89,6 +107,7 @@ fn exec_with_policy(policy: &Path, cmd: &str) -> ExitCode {
     }
 }
 
+#[cfg(target_os = "macos")]
 /// Where the session records live. The environment is the caller's, and the
 /// caller is what we are defending against, so this is `~/.nd7/sessions`
 /// with `~` from passwd, via the library. `ND7_SESSIONS_DIR` is a test seam and is only
@@ -101,6 +120,7 @@ fn sessions_dir() -> Result<PathBuf> {
     Ok(nd7_core::session::sessions_root()?)
 }
 
+#[cfg(target_os = "macos")]
 fn find_session(sessions_dir: &Path) -> Option<PathBuf> {
     let mut pid = unsafe { libc::getppid() };
     while pid > 1 {
@@ -113,6 +133,7 @@ fn find_session(sessions_dir: &Path) -> Option<PathBuf> {
     None
 }
 
+#[cfg(target_os = "macos")]
 fn parent_of(pid: libc::pid_t) -> Option<libc::pid_t> {
     let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of::<libc::proc_bsdinfo>() as c_int;
@@ -129,11 +150,13 @@ fn parent_of(pid: libc::pid_t) -> Option<libc::pid_t> {
     (n == size).then_some(info.pbi_ppid as libc::pid_t)
 }
 
+#[cfg(target_os = "macos")]
 fn policy(session: PathBuf) -> Option<PathBuf> {
     let policy_path = session.join("policy.sb");
     policy_path.exists().then_some(policy_path)
 }
 
+#[cfg(target_os = "macos")]
 fn exec_shell(cmd: &str) -> ExitCode {
     // Exec, not spawn: this process becomes the shell. There is no
     // intermediary to orphan the command when Claude Code kills it, and the
@@ -144,10 +167,12 @@ fn exec_shell(cmd: &str) -> ExitCode {
     ExitCode::from(126)
 }
 
+#[cfg(target_os = "macos")]
 fn confined() -> bool {
     unsafe { sandbox_check(libc::getpid(), std::ptr::null(), 0) != 0 }
 }
 
+#[cfg(target_os = "macos")]
 #[cfg(test)]
 mod tests {
     use super::*;
