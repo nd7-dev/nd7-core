@@ -10,8 +10,10 @@
 //!   becomes the shell for one command. Same body, plus the grants, and no
 //!   way out.
 //!
-//! Both end with the same per-operation deny of nd7's own records, so no
-//! grant and no later rule can make the flight recorder writable.
+//! Both end with the same two per-operation denies: nd7's own records, so no
+//! grant and no later rule can make the flight recorder writable, and the
+//! agents' own configuration files, so a session cannot change the hooks or
+//! the sandbox settings the sessions after it start with.
 //!
 //! This module only renders text; the paths come from the caller, already
 //! canonical, because Seatbelt's `subpath` matches resolved paths.
@@ -27,7 +29,7 @@ pub struct Policy {
     /// one place the agent may write from the start.
     pub project: PathBuf,
     /// The user's home, from passwd. Only used to locate `~/.ssh`, `~/.aws`,
-    /// `~/.nd7` and `~/.claude`; it is never writable as a whole.
+    /// `~/.nd7`, `~/.claude` and `~/.codex`; it is never writable as a whole.
     pub home: PathBuf,
     /// The canonical `std::env::temp_dir()`.
     pub tmp: PathBuf,
@@ -61,6 +63,7 @@ impl Policy {
             sbpl_string(&self.exit)
         ));
         out.push_str(&self.deny_records());
+        out.push_str(&self.deny_agent_config());
         out
     }
 
@@ -77,6 +80,7 @@ impl Policy {
             }
         }
         out.push_str(&self.deny_records());
+        out.push_str(&self.deny_agent_config());
         out
     }
 
@@ -97,10 +101,11 @@ impl Policy {
 (allow file-read*)
 (deny file-read* file-read-data file-read-metadata file-read-xattr (subpath {ssh}) (subpath {aws}) (subpath {records}))
 
-;; Writable: the project, the temp dir, Claude Code's scratch directories and
-;; its own state. HOME is matched as a subpath rather than spliced into the
-;; regex, because escaping a path into a regex is error-prone.
-(allow file-write* (subpath {project}) (subpath {tmp}) (regex #"^/private/tmp/claude-") (require-all (subpath {home}) (regex #"/\.claude(/|$)")))
+;; Writable: the project, the temp dir, Claude Code's scratch directories, and
+;; each agent's own state, `~/.claude` and `~/.codex`. HOME is matched as a
+;; subpath rather than spliced into the regex, because escaping a path into a
+;; regex is error-prone.
+(allow file-write* (subpath {project}) (subpath {tmp}) (regex #"^/private/tmp/claude-") (require-all (subpath {home}) (regex #"/\.claude(/|$)")) (require-all (subpath {home}) (regex #"/\.codex(/|$)")))
 
 ;; DNS, network configuration and the keychain: what an HTTPS client needs.
 (allow mach-lookup (global-name "com.apple.dnssd.service") (global-name "com.apple.SystemConfiguration.configd") (global-name "com.apple.SecurityServer"))
@@ -127,6 +132,24 @@ impl Policy {
 (deny {WRITE_OPS} (subpath {records}))
 ",
             records = sbpl_string(&self.home.join(".nd7"))
+        )
+    }
+
+    /// The rule after that one, and the last of either profile: the agents'
+    /// own configuration. The rest of `~/.claude` and `~/.codex` is writable,
+    /// so the agents work, but not the files that decide what hooks and what
+    /// sandbox the sessions after this one start with. `~/.codex/auth.json`
+    /// is deliberately absent: refreshing a ChatGPT token rewrites it.
+    fn deny_agent_config(&self) -> String {
+        format!(
+            "
+;; And last of all, for the same reason: a session may not rewrite the hooks
+;; or the sandbox settings that the next session starts with.
+(deny {WRITE_OPS} (literal {codex_config}) (literal {codex_hooks}) (literal {claude_settings}))
+",
+            codex_config = sbpl_string(&self.home.join(".codex/config.toml")),
+            codex_hooks = sbpl_string(&self.home.join(".codex/hooks.json")),
+            claude_settings = sbpl_string(&self.home.join(".claude/settings.json")),
         )
     }
 }
@@ -172,10 +195,11 @@ mod tests {
 (allow file-read*)
 (deny file-read* file-read-data file-read-metadata file-read-xattr (subpath "/Users/ada/.ssh") (subpath "/Users/ada/.aws") (subpath "/Users/ada/.nd7"))
 
-;; Writable: the project, the temp dir, Claude Code's scratch directories and
-;; its own state. HOME is matched as a subpath rather than spliced into the
-;; regex, because escaping a path into a regex is error-prone.
-(allow file-write* (subpath "/Users/ada/proj") (subpath "/private/tmp") (regex #"^/private/tmp/claude-") (require-all (subpath "/Users/ada") (regex #"/\.claude(/|$)")))
+;; Writable: the project, the temp dir, Claude Code's scratch directories, and
+;; each agent's own state, `~/.claude` and `~/.codex`. HOME is matched as a
+;; subpath rather than spliced into the regex, because escaping a path into a
+;; regex is error-prone.
+(allow file-write* (subpath "/Users/ada/proj") (subpath "/private/tmp") (regex #"^/private/tmp/claude-") (require-all (subpath "/Users/ada") (regex #"/\.claude(/|$)")) (require-all (subpath "/Users/ada") (regex #"/\.codex(/|$)")))
 
 ;; DNS, network configuration and the keychain: what an HTTPS client needs.
 (allow mach-lookup (global-name "com.apple.dnssd.service") (global-name "com.apple.SystemConfiguration.configd") (global-name "com.apple.SecurityServer"))
@@ -189,6 +213,13 @@ mod tests {
 ;; Last, so the last match wins: nd7's own records stay unwritable, whatever
 ;; the rules above allow.
 (deny file-write* file-write-acl file-write-create file-write-data file-write-flags file-write-mode file-write-owner file-write-setugid file-write-unlink file-write-xattr file-link (subpath "/Users/ada/.nd7"))
+"#;
+
+    /// The rule after that one, for the policy `sample` returns.
+    const DENY_AGENT_CONFIG: &str = r#"
+;; And last of all, for the same reason: a session may not rewrite the hooks
+;; or the sandbox settings that the next session starts with.
+(deny file-write* file-write-acl file-write-create file-write-data file-write-flags file-write-mode file-write-owner file-write-setugid file-write-unlink file-write-xattr file-link (literal "/Users/ada/.codex/config.toml") (literal "/Users/ada/.codex/hooks.json") (literal "/Users/ada/.claude/settings.json"))
 "#;
 
     fn sample() -> Policy {
@@ -208,7 +239,7 @@ mod tests {
 ;; The floor's one exit: nd7-exec, which applies the session policy to itself
 ;; before it runs anything. Nothing else leaves this sandbox.
 (allow process-exec (with no-sandbox) (literal "/usr/local/bin/nd7-exec"))
-{DENY_RECORDS}"#
+{DENY_RECORDS}{DENY_AGENT_CONFIG}"#
         );
 
         assert_eq!(sample().render_floor(), expected);
@@ -228,7 +259,7 @@ mod tests {
 ;; Write roots added by `nd7 allow` during this run.
 (allow file-write* (subpath "/Users/ada/data"))
 (allow file-write* (subpath "/Volumes/scratch"))
-{DENY_RECORDS}"#
+{DENY_RECORDS}{DENY_AGENT_CONFIG}"#
         );
 
         assert_eq!(policy.render_policy(), expected);
@@ -236,7 +267,10 @@ mod tests {
 
     #[test]
     fn policy_without_grants_is_the_body_and_the_deny() {
-        assert_eq!(sample().render_policy(), format!("{BODY}{DENY_RECORDS}"));
+        assert_eq!(
+            sample().render_policy(),
+            format!("{BODY}{DENY_RECORDS}{DENY_AGENT_CONFIG}")
+        );
     }
 
     #[test]
@@ -370,6 +404,20 @@ mod tests {
 
             assert_denied(&profile, &root.join(".nd7/probe"));
             assert_allowed(&profile, &root.join("elsewhere"));
+
+            fs::remove_dir_all(&root).unwrap();
+        }
+
+        #[test]
+        fn a_session_writes_its_agent_state_but_not_its_configuration() {
+            let root = scratch("agent-state");
+            fs::create_dir_all(root.join(".codex/sessions")).unwrap();
+            let policy = over(&root, Vec::new());
+
+            for profile in [policy.render_policy(), policy.render_floor()] {
+                assert_allowed(&profile, &root.join(".codex/sessions/x"));
+                assert_denied(&profile, &root.join(".codex/config.toml"));
+            }
 
             fs::remove_dir_all(&root).unwrap();
         }
