@@ -5,7 +5,8 @@
 //! needs `--dangerously-bypass-hook-trust` and prints two advisories at every
 //! start, because only a hook discovered from a configuration file carries the
 //! trust hash it checks. Writing the hooks once — `nd7 init` — removes that,
-//! and registers the `record` hooks the log is made of at the same time.
+//! registers the `record` hooks the log is made of at the same time, and
+//! records the approval Codex would otherwise ask for at its next start.
 //!
 //! Everything here is idempotent: an install looks for a hook that is already
 //! there before adding one, so running `nd7 init` twice writes nothing the
@@ -17,6 +18,7 @@
 //! them is the only line `nd7 init` adds to a shell rc.
 
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fmt, fs,
     io::{self, Write},
     os::unix::fs::PermissionsExt,
@@ -24,6 +26,7 @@ use std::{
 };
 
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 
 /// An agent nd7 knows how to configure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +67,16 @@ const RECORD_EVENTS: [&str; 7] = [
     "PreToolUse",
     "PostToolUse",
     "PostToolUseFailure",
+    "Stop",
+    "SessionEnd",
+];
+
+/// The same for Codex, which has no `PostToolUseFailure` event.
+const CODEX_RECORD_EVENTS: [&str; 6] = [
+    "SessionStart",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
     "Stop",
     "SessionEnd",
 ];
@@ -183,7 +196,7 @@ pub fn install_codex(config: &Path, nd7: &Path) -> io::Result<Changed> {
     // Codex sends Claude Code's hook payloads, so `nd7 record` reads them
     // unchanged.
     let record = toml_string(&format!("{nd7} record"));
-    for event in RECORD_EVENTS {
+    for event in CODEX_RECORD_EVENTS {
         if codex_command(&text, event, |command| command.ends_with(RECORD_TAIL)) {
             continue;
         }
@@ -200,6 +213,40 @@ pub fn install_codex(config: &Path, nd7: &Path) -> io::Result<Changed> {
              type = \"command\"\n\
              command = {record}\n\
              timeout = {timeout}\n",
+        ));
+    }
+
+    // Codex asks the user to approve every hook it discovers, and records the
+    // approval as a hash of the hook under `[hooks.state]`. It records it by
+    // rewriting this file, which `nd7 run` makes unwritable, so the approval
+    // could never be given from a session nd7 started; nd7 writes it here for
+    // the hooks it installed itself, and for no others.
+    let mut installed = text.clone();
+    if !installed.is_empty() && !installed.ends_with('\n') {
+        installed.push('\n');
+    }
+    installed.push_str(&add);
+    let trusted = codex_trust_keys_present(&installed);
+    let ours = format!("{nd7} ");
+    for hook in codex_hook_tables(&installed) {
+        if !hook.command.starts_with(&ours) {
+            continue;
+        }
+        let key = codex_trust_key(config, &hook);
+        if trusted.contains(&key) {
+            continue;
+        }
+        add.push_str(&format!(
+            "\n# nd7: approval Codex would otherwise ask for on first start. Installed by `nd7 init`.\n\
+             [hooks.state.{key}]\n\
+             trusted_hash = \"{hash}\"\n",
+            key = toml_string(&key),
+            hash = codex_trust_hash(
+                &hook.event,
+                hook.matcher.as_deref(),
+                &hook.command,
+                hook.timeout
+            ),
         ));
     }
 
@@ -231,43 +278,223 @@ pub fn codex_has_hook(config: &Path, nd7: &Path) -> bool {
     codex_command(&text, "PreToolUse", |command| command == want)
 }
 
-/// Whether every nd7 hook in a Codex config carries the `trusted_hash` Codex
-/// writes when the user approves it. Codex approves hooks by rewriting
-/// `config.toml`, and under `nd7 run` that file is deliberately unwritable, so
-/// approval has to happen in a session nd7 did not start. Until it has, `nd7
-/// run` passes `--dangerously-bypass-hook-trust` and says so. False when the
-/// file has no nd7 hook at all.
+/// Whether every nd7 hook in a Codex config is one Codex has a `trusted_hash`
+/// for. Codex approves hooks by rewriting `config.toml`, and under `nd7 run`
+/// that file is deliberately unwritable, so approval cannot happen in a
+/// session nd7 started; `nd7 init` writes it instead, and this stays false
+/// only for a file edited afterwards. Until it is true, `nd7 run` passes
+/// `--dangerously-bypass-hook-trust` and says so. False when the file has no
+/// nd7 hook at all. The hash itself is not checked here; Codex does that.
 pub fn codex_hooks_trusted(config: &Path, nd7: &Path) -> bool {
     let Ok(text) = fs::read_to_string(config) else {
         return false;
     };
+    let trusted = codex_trust_keys_present(&text);
     let ours = format!("{} ", nd7.display());
-    let (mut found, mut all_trusted) = (false, true);
-    // One nd7 hook table at a time: its command, and whether a hash followed.
-    let (mut in_hooks_table, mut is_ours, mut trusted) = (false, false, false);
-    let mut close = |is_ours: bool, trusted: bool| {
-        if is_ours {
-            found = true;
-            all_trusted &= trusted;
+    let mut found = false;
+    for hook in codex_hook_tables(&text) {
+        if !hook.command.starts_with(&ours) {
+            continue;
         }
-    };
+        if !trusted.contains(&codex_trust_key(config, &hook)) {
+            return false;
+        }
+        found = true;
+    }
+    found
+}
+
+/// The `trusted_hash` Codex writes for an approved hook: `sha256:` and the hex
+/// digest of the handler's canonical JSON, which is
+/// `{"event_name":…,"hooks":[{"async":false,"command":…,"timeout":…,"type":"command"}]}`
+/// — plus a top-level `"matcher"`, and only when the group table has a
+/// `matcher` line at all — printed compactly with its keys sorted. `event` is
+/// the CamelCase name; `timeout` is the effective one, in seconds. Reproduced
+/// against the hashes Codex 0.155.1 wrote for all seven of nd7's hooks.
+pub fn codex_trust_hash(event: &str, matcher: Option<&str>, command: &str, timeout: u64) -> String {
+    // serde_json's map is a `BTreeMap` here, so this prints sorted already.
+    let mut hook = json!({
+        "event_name": codex_event_label(event),
+        "hooks": [ { "async": false, "command": command, "timeout": timeout, "type": "command" } ],
+    });
+    if let Some(matcher) = matcher {
+        hook["matcher"] = json!(matcher);
+    }
+    let json = serde_json::to_string(&hook).expect("a JSON object serialises");
+    let mut out = String::from("sha256:");
+    for byte in Sha256::digest(json.as_bytes()) {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+/// The keys of the `[hooks.state."…"]` tables in `text` that carry a
+/// `trusted_hash`. A key is `<config path>:<event label>:<group>:<handler>`,
+/// the path spelled as Codex opened the file.
+pub fn codex_trust_keys_present(text: &str) -> BTreeSet<String> {
+    let mut keys = BTreeSet::new();
+    let mut key = None;
     for line in text.lines() {
         let line = line.trim();
         if let Some(header) = line.strip_prefix('[') {
-            close(is_ours, trusted);
             let header = header.trim_matches(['[', ']']).trim();
-            in_hooks_table = header.starts_with("hooks.") && header.ends_with(".hooks");
-            (is_ours, trusted) = (false, false);
-        } else if in_hooks_table {
-            if let Some(command) = toml_command(line) {
-                is_ours = command.starts_with(&ours);
-            } else if line.starts_with("trusted_hash") {
-                trusted = true;
+            key = header
+                .strip_prefix("hooks.state.")
+                .and_then(toml_unquote)
+                .map(str::to_owned);
+        } else if line.starts_with("trusted_hash")
+            && let Some(key) = &key
+        {
+            keys.insert(key.clone());
+        }
+    }
+    keys
+}
+
+/// The state key Codex records a hook's approval under.
+fn codex_trust_key(config: &Path, hook: &CodexHook) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        config.display(),
+        codex_event_label(&hook.event),
+        hook.group,
+        hook.handler
+    )
+}
+
+/// Codex's name for an event, in a state key and in the hashed JSON:
+/// `PreToolUse` becomes `pre_tool_use`.
+fn codex_event_label(event: &str) -> String {
+    let mut label = String::with_capacity(event.len() + 4);
+    for (i, c) in event.char_indices() {
+        if c.is_ascii_uppercase() {
+            if i > 0 {
+                label.push('_');
+            }
+            label.push(c.to_ascii_lowercase());
+        } else {
+            label.push(c);
+        }
+    }
+    label
+}
+
+/// One `[[hooks.<Event>.hooks]]` table, placed the way Codex keys its trust
+/// state: `group` is the index of its `[[hooks.<Event>]]` table among that
+/// event's tables in file order, `handler` its own index within that group.
+struct CodexHook {
+    event: String,
+    group: usize,
+    handler: usize,
+    matcher: Option<String>,
+    command: String,
+    timeout: u64,
+}
+
+/// Codex's default hook timeout, and so the one a table without a `timeout`
+/// line is hashed with.
+const CODEX_DEFAULT_TIMEOUT: u64 = 600;
+
+/// Every command handler in `text`, with its position and the fields the trust
+/// hash is made of. Line-based like `codex_command`, and with the same limits:
+/// a hook given as an inline array is not seen.
+/// The hook events Codex 0.155.1 knows. A table for any other event is
+/// accepted by its parser and then ignored: it never runs and never gets a
+/// trust entry, so it must not count for or against trust either.
+const CODEX_EVENTS: [&str; 12] = [
+    "PreToolUse",
+    "PermissionRequest",
+    "PostToolUse",
+    "PreCompact",
+    "PostCompact",
+    "SessionStart",
+    "SessionEnd",
+    "UserPromptSubmit",
+    "SubagentStart",
+    "SubagentStop",
+    "Stop",
+    "Interrupt",
+];
+
+fn codex_hook_tables(text: &str) -> Vec<CodexHook> {
+    let mut tables = codex_hook_tables_all(text);
+    tables.retain(|hook| CODEX_EVENTS.contains(&hook.event.as_str()));
+    tables
+}
+
+fn codex_hook_tables_all(text: &str) -> Vec<CodexHook> {
+    let mut tables = Vec::new();
+    // How many groups of each event the file has had so far, and the group the
+    // handler tables that follow belong to: its event, index and matcher.
+    let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+    let mut group: Option<(String, usize, Option<String>)> = None;
+    // The handler table being read: its index in the group, and its fields.
+    let mut open: Option<usize> = None;
+    let mut handlers = 0;
+    let mut command: Option<String> = None;
+    let mut timeout: Option<u64> = None;
+    let mut is_command = false;
+
+    // The trailing header closes the last table.
+    for line in text.lines().chain(std::iter::once("[")) {
+        let line = line.trim();
+        let Some(header) = line.strip_prefix('[') else {
+            if open.is_some() {
+                if let Some(value) = toml_value(line, "command") {
+                    command = toml_unquote(value).map(str::to_owned);
+                } else if let Some(value) = toml_value(line, "timeout") {
+                    timeout = value.parse().ok();
+                } else if let Some(value) = toml_value(line, "type") {
+                    is_command = toml_unquote(value) == Some("command");
+                }
+            } else if let Some((_, _, matcher)) = group.as_mut()
+                && let Some(value) = toml_value(line, "matcher")
+            {
+                *matcher = toml_unquote(value).map(str::to_owned);
+            }
+            continue;
+        };
+
+        if let Some(handler) = open
+            && is_command
+            && let Some(command) = command.take()
+            && let Some((event, index, matcher)) = &group
+        {
+            tables.push(CodexHook {
+                event: event.clone(),
+                group: *index,
+                handler,
+                matcher: matcher.clone(),
+                command,
+                timeout: timeout.unwrap_or(CODEX_DEFAULT_TIMEOUT),
+            });
+        }
+        open = None;
+        command = None;
+        timeout = None;
+        is_command = false;
+
+        let header = header.trim_matches(['[', ']']).trim();
+        let Some(event) = header.strip_prefix("hooks.") else {
+            group = None;
+            continue;
+        };
+        match event.strip_suffix(".hooks") {
+            // A handler of the group above it, and of nothing else.
+            Some(event) if group.as_ref().is_some_and(|(open, ..)| open == event) => {
+                open = Some(handlers);
+                handlers += 1;
+            }
+            Some(_) => group = None,
+            None => {
+                let count = seen.entry(event.to_owned()).or_insert(0);
+                group = Some((event.to_owned(), *count, None));
+                *count += 1;
+                handlers = 0;
             }
         }
     }
-    close(is_ours, trusted);
-    found && all_trusted
+    tables
 }
 
 /// Writes `~/.nd7/aliases.sh`, one `alias <agent>='nd7 run <agent>'` per
@@ -431,7 +658,7 @@ fn codex_command(text: &str, event: &str, accept: impl Fn(&str) -> bool) -> bool
             let header = header.trim_matches(['[', ']']).trim();
             inside = header == table || header == hooks;
         } else if inside
-            && let Some(command) = toml_command(line)
+            && let Some(command) = toml_value(line, "command").and_then(toml_unquote)
             && accept(command)
         {
             return true;
@@ -440,10 +667,16 @@ fn codex_command(text: &str, event: &str, accept: impl Fn(&str) -> bool) -> bool
     false
 }
 
-/// The value of a `command = "…"` line, if that is what this line is.
-fn toml_command(line: &str) -> Option<&str> {
-    let rest = line.strip_prefix("command")?.trim_start();
-    let value = rest.strip_prefix('=')?.trim_start().strip_prefix('"')?;
+/// The right-hand side of a `<key> = <value>` line, if that is what this line
+/// is.
+fn toml_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let rest = line.strip_prefix(key)?.trim_start();
+    Some(rest.strip_prefix('=')?.trim_start())
+}
+
+/// The contents of a TOML basic string, up to its closing quote.
+fn toml_unquote(value: &str) -> Option<&str> {
+    let value = value.strip_prefix('"')?;
     value.get(..value.find('"')?)
 }
 
@@ -647,34 +880,148 @@ mod tests {
         );
     }
 
+    /// The hashes Codex 0.155.1 wrote for nd7's own seven hooks, which is the
+    /// whole of what makes the approval `nd7 init` writes an approval.
     #[test]
-    fn codex_trust_is_per_nd7_hook() {
+    fn codex_tables_for_events_codex_does_not_know_are_ignored() {
+        let text = "[[hooks.PostToolUseFailure]]\n\n[[hooks.PostToolUseFailure.hooks]]\ntype = \"command\"\ncommand = \"/opt/nd7 record\"\ntimeout = 5\n\n[[hooks.Stop]]\n\n[[hooks.Stop.hooks]]\ntype = \"command\"\ncommand = \"/opt/nd7 record\"\ntimeout = 5\n";
+        let tables = codex_hook_tables(text);
+        let events: Vec<&str> = tables.iter().map(|h| h.event.as_str()).collect();
+        assert_eq!(events, ["Stop"]);
+    }
+
+    #[test]
+    fn codex_trust_hashes_match_what_codex_wrote() {
+        // The recipe hashes the compact JSON with its keys sorted, which is
+        // what `json!` prints only because serde_json's map is a `BTreeMap`.
+        assert_eq!(json!({ "b": 1, "a": 0 }).to_string(), r#"{"a":0,"b":1}"#);
+
+        const BIN: &str = "/Users/ahmedabouzied/code/work/nd7/nd7-core/target/debug/nd7";
+        let record = format!("{BIN} record");
+        assert_eq!(
+            codex_trust_hash("PreToolUse", Some(""), &format!("{BIN} hook-prefix"), 30),
+            "sha256:f9cbd7b6646c3a4b20eb1bb2451eb42e878f8dea1806bd797a4ab352b49a66c3"
+        );
+        for (event, timeout, hash) in [
+            (
+                "PreToolUse",
+                5,
+                "sha256:cabe9c60eb00ed439de3b0b8de1042fe963862bada93934e23bfa33f365a1743",
+            ),
+            (
+                "PostToolUse",
+                5,
+                "sha256:c030f1fab807ae5792b048059214fb6a5d97ec6cce3d88ac106b9d133a67114d",
+            ),
+            (
+                "SessionStart",
+                5,
+                "sha256:046fda48a39155761ff4bc80d8d9476b51be21b3f8d28c4414707aee0d3368a7",
+            ),
+            (
+                "SessionEnd",
+                3,
+                "sha256:a6cfa7762b2e64ff2742a9ab7e0076b490c14dd15838fcde8faa197c85349eec",
+            ),
+            (
+                "UserPromptSubmit",
+                5,
+                "sha256:dbc9e1486d479ad2c9184b01810a67bf8717b68c0c402b3a67cbdecfa657c5aa",
+            ),
+            (
+                "Stop",
+                5,
+                "sha256:7f875b333a36a1a74f4a222c9198f7b57d3205f82068546c73ddd5267348a362",
+            ),
+        ] {
+            assert_eq!(
+                codex_trust_hash(event, None, &record, timeout),
+                hash,
+                "{event}"
+            );
+        }
+    }
+
+    /// `nd7 init` writes the approval, so the hooks are trusted as soon as
+    /// they are installed, and stay so when it runs again.
+    #[test]
+    fn codex_install_writes_the_trust_codex_would_ask_for() {
         let dir = scratch("codex-trust");
         let config = dir.join("config.toml");
-        let nd7 = Path::new("/opt/nd7");
+        let nd7 = Path::new(ND7);
         assert!(!codex_hooks_trusted(&config, nd7), "no file");
+
         install_codex(&config, nd7).unwrap();
-        assert!(
-            !codex_hooks_trusted(&config, nd7),
-            "installed, nothing approved"
-        );
-        // Codex approves by adding trusted_hash to each hook table. A foreign
-        // hook without one does not count against nd7's.
-        let approved = fs::read_to_string(&config)
-            .unwrap()
-            .replace("timeout = 30\n", "timeout = 30\ntrusted_hash = \"abc\"\n")
-            .replace("timeout = 5\n", "timeout = 5\ntrusted_hash = \"abc\"\n")
-            .replace("timeout = 3\n", "timeout = 3\ntrusted_hash = \"abc\"\n")
-            + "\n[[hooks.Stop]]\n\n[[hooks.Stop.hooks]]\ntype = \"command\"\ncommand = \"/other/tool\"\n";
-        fs::write(&config, approved).unwrap();
+        let text = fs::read_to_string(&config).unwrap();
         assert!(codex_hooks_trusted(&config, nd7));
-        // One nd7 hook left unapproved: not trusted.
-        let partial =
-            fs::read_to_string(&config)
-                .unwrap()
-                .replacen("trusted_hash = \"abc\"\n", "", 1);
-        fs::write(&config, partial).unwrap();
+        assert!(text.contains(&format!(
+            "[hooks.state.\"{}:pre_tool_use:0:0\"]\ntrusted_hash = \"{}\"\n",
+            config.display(),
+            codex_trust_hash("PreToolUse", Some(""), &format!("{ND7} hook-prefix"), 30)
+        )));
+        assert_eq!(
+            codex_trust_keys_present(&text).len(),
+            7,
+            "the prefix hook and six record hooks"
+        );
+        assert_eq!(
+            install_codex(&config, nd7).unwrap(),
+            Changed::AlreadyInstalled
+        );
+        assert_eq!(fs::read_to_string(&config).unwrap(), text);
+
+        // Only a later edit can take the trust away again.
+        let edited = text.replacen("trusted_hash", "was_trusted_hash", 1);
+        fs::write(&config, edited).unwrap();
         assert!(!codex_hooks_trusted(&config, nd7));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The layout Codex keys its state by: a foreign `PreToolUse` group first
+    /// puts nd7's at index 1, and the state table Codex writes for it is the
+    /// one that counts — another config's is not.
+    #[test]
+    fn codex_trust_reads_the_state_codex_writes() {
+        let dir = scratch("codex-state");
+        let config = dir.join("config.toml");
+        let nd7 = Path::new(ND7);
+        let hooks = format!(
+            "[[hooks.PreToolUse]]\n\
+             matcher = \"Bash\"\n\
+             \n\
+             [[hooks.PreToolUse.hooks]]\n\
+             type = \"command\"\n\
+             command = \"/usr/bin/audit\"\n\
+             timeout = 10\n\
+             \n\
+             [[hooks.PreToolUse]]\n\
+             matcher = \"\"\n\
+             \n\
+             [[hooks.PreToolUse.hooks]]\n\
+             type = \"command\"\n\
+             command = \"{ND7} hook-prefix\"\n\
+             timeout = 30\n"
+        );
+        let ours = &codex_hook_tables(&hooks)[1];
+        assert_eq!((ours.group, ours.handler), (1, 0));
+        assert_eq!(ours.matcher.as_deref(), Some(""));
+        assert_eq!(ours.timeout, 30);
+
+        let unrelated = "\n[hooks.state.\"/x:stop:0:0\"]\n\
+                         trusted_hash = \"sha256:00\"\n";
+        fs::write(&config, format!("{hooks}{unrelated}")).unwrap();
+        assert!(!codex_hooks_trusted(&config, nd7));
+
+        fs::write(
+            &config,
+            format!(
+                "{hooks}{unrelated}\n[hooks.state.\"{}:pre_tool_use:1:0\"]\ntrusted_hash = \"{}\"\n",
+                config.display(),
+                codex_trust_hash("PreToolUse", Some(""), &format!("{ND7} hook-prefix"), 30)
+            ),
+        )
+        .unwrap();
+        assert!(codex_hooks_trusted(&config, nd7));
         fs::remove_dir_all(&dir).unwrap();
     }
 
