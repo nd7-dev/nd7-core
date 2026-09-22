@@ -76,6 +76,30 @@ intrusive to run, and the input to both of the others.
 The competitor we measure against, nono, started from the opposite end
 (confine first, log decisions). See [COMPETITIVE-NOTES.md](COMPETITIVE-NOTES.md).
 
+## Agents
+
+nd7 is agent-agnostic by design: the floor and `nd7-exec` confine any
+program, and the log's envelope does not care who produced an event. Each
+agent still needs four things measured and wired, in this order:
+
+1. what its process needs the floor to allow (config and state directories,
+   API hosts, credential store);
+2. how it behaves when its own sandbox is refused by the kernel, and the
+   per-invocation flag that makes it run commands directly;
+3. whether it has a hook that can rewrite a command before it runs, which
+   is what gives it the per-call policy and live `nd7 allow`; without one it
+   gets the floor plus restart-to-widen;
+4. a recording source: hook payloads, or a session file to tail, mapped onto
+   the nd7 event model.
+
+| agent | status |
+|---|---|
+| Claude Code | all four done: ADR-0007, `nd7 run claude` |
+| OpenAI Codex CLI | spike planned; uses Seatbelt itself on macOS, so the veto applies |
+| Google Antigravity | to check |
+| OpenCode | to check |
+| others (Gemini CLI, Cursor agent, Aider, …) | as demand appears |
+
 ## Open core
 
 The engine (recorder, format, reader, verifier, later the kernel collectors
