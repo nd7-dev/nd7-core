@@ -51,8 +51,8 @@ matters only where noted.
 - [~] **M8. Release hygiene.** (CI added 2026-09-19 in both repos: `cargo
   fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`
   on ubuntu-latest and macos-latest, plus the viewer's Node test in
-  nd7-vault. Still open: choose a licence — there is no LICENSE file in
-  either repo and both READMEs say so.) `cargo install` works from a clean
+  nd7-vault. Licence chosen 2026-09-22: MIT, with a LICENSE file in
+  nd7-core.) `cargo install` works from a clean
   checkout, `--help` is accurate, README install steps verified end to end,
   CI runs tests on macOS and Linux, licence file chosen.
 

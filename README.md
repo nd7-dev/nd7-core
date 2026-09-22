@@ -249,4 +249,4 @@ Frames carry `prev` and `hash`, and `nd7 verify` checks them. The sandbox
 is new and tested on macOS 26 with Claude Code 2.1.x; the policy will
 tighten as recorded sessions show what is actually needed.
 
-Licence: not yet chosen.
+Licence: MIT. See [LICENSE](LICENSE).
