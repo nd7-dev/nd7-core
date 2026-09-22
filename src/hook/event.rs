@@ -111,7 +111,8 @@ impl Kind {
 pub struct Body {
     /// Agent's working directory at the hook. Join key for effects.
     pub cwd: String,
-    pub transcript_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_path: Option<String>,
     /// Kept even though `kind` is derived from it.
     pub hook_event_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

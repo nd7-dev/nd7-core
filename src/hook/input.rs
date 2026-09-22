@@ -130,7 +130,10 @@ pub struct Common {
     /// Kept verbatim even though [`HookEvent`] is derived from it, so a
     /// renamed or unknown event is never lost.
     pub hook_event_name: String,
-    pub transcript_path: String,
+    /// `null` from Codex under `--ephemeral`, and absent in nothing we have
+    /// seen; kept optional so a payload without a transcript still records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_path: Option<String>,
     pub cwd: String,
     /// Claude Code >= 2.1.257. Absent when the session has no scratchpad.
     #[serde(default, skip_serializing_if = "Option::is_none")]

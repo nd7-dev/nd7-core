@@ -54,7 +54,7 @@ from the hook payload's common section:
 | field             | type   | req | source | notes |
 |-------------------|--------|-----|--------|-------|
 | `cwd`             | string | yes | hook   | Agent's working directory at the hook. **Join key** for effects. |
-| `transcript_path` | string | yes | hook   | Path to Claude Code's own transcript. Lets a reader cross-check our record against the agent's. |
+| `transcript_path` | string | no | hook   | Path to the agent's own transcript; absent when the agent has none (Codex `--ephemeral`). Lets a reader cross-check our record against the agent's. |
 | `hook_event_name` | string | yes | hook   | Recorded even though `kind` is derived from it, so an unknown or renamed event is never lost. |
 | `permission_mode` | string | opt | hook   | `default`, `plan`, `acceptEdits`, `auto`, `dontAsk`, `bypassPermissions`. Verified present on `PreToolUse`, `PostToolUse`, `PostToolBatch`, `UserPromptSubmit`, `Stop`, `SubagentStop`; verified absent on `MessageDisplay`, `Notification`, `CwdChanged`, `ConfigChange`; absent on `SessionStart`/`SessionEnd` per docs. |
 | `scratchpad_dir`  | string | opt | hook   | Session scratch directory (Claude Code ≥ 2.1.257). Verified present on every event of the test session. Files the agent writes there are effects we will want to attribute, so this is a **join key**. Parsed, not yet stored in the body (next step). |
