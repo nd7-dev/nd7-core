@@ -246,7 +246,7 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
                             &nd7,
                         ) =>
                 {
-                    " (hooks: installed, not yet trusted; start `command codex` once outside nd7 and approve them)"
+                    " (hooks: installed, not yet trusted; run `nd7 init codex` to record Codex's approval)"
                 }
                 Some(agent) if installed(agent, &policy.home, &nd7) => " (hooks: installed)",
                 Some(_) => " (hooks: per-invocation; run `nd7 init` to install them)",
@@ -439,8 +439,9 @@ fn codex_flags(home: &std::path::Path, nd7: &std::path::Path) -> Vec<String> {
             r#"hooks.PreToolUse=[{{matcher="", hooks=[{{type="command", command={hook}, timeout=30}}]}}]"#
         ));
     } else if !agent_config::codex_hooks_trusted(&config, nd7) {
-        // Installed but not yet approved. Codex records approval by writing
-        // config.toml, which the floor forbids, so it cannot happen here.
+        // Installed, but the approval `nd7 init` writes is not there any more.
+        // Codex records approval by writing config.toml, which the floor
+        // forbids, so it cannot be given back from here.
         flags.push("--dangerously-bypass-hook-trust".to_owned());
     }
     flags.push("-c".to_owned());
@@ -579,7 +580,7 @@ fn init_agents(args: impl Iterator<Item = String>) -> Result<()> {
         );
         if agent == Agent::Codex {
             println!(
-                "note: Codex asks you to trust newly configured hooks the first time you start it."
+                "note: the hooks are recorded as approved, so Codex does not ask about them at its next start."
             );
         }
     }
@@ -815,24 +816,22 @@ mod tests {
                 .join(" ")
                 .contains(r#"{"sandbox":{"enabled":false}}"#)
         );
-        // Installed but not yet approved by the user: no hook on the command
-        // line, but the trust bypass stays until Codex has written its hashes.
-        let codex = codex_flags(&home, &nd7);
-        assert!(!codex.join(" ").contains("hook-prefix"));
-        assert!(codex.contains(&"--dangerously-bypass-hook-trust".to_owned()));
-        // Approved: Codex adds trusted_hash to every hook table.
-        let config = home.join(".codex/config.toml");
-        let approved = fs::read_to_string(&config)
-            .unwrap()
-            .replace("timeout = 30\n", "timeout = 30\ntrusted_hash = \"x\"\n")
-            .replace("timeout = 5\n", "timeout = 5\ntrusted_hash = \"x\"\n")
-            .replace("timeout = 3\n", "timeout = 3\ntrusted_hash = \"x\"\n");
-        fs::write(&config, approved).unwrap();
+        // Installed, and `nd7 init` wrote the approval with it: no hook on the
+        // command line, and no trust bypass either.
         let codex = codex_flags(&home, &nd7);
         assert!(!codex.join(" ").contains("hook-prefix"));
         assert!(!codex.contains(&"--dangerously-bypass-hook-trust".to_owned()));
         assert!(codex.join(" ").contains("developer_instructions="));
         assert!(codex.contains(&"danger-full-access".to_owned()));
+        // The approval taken away again by hand: the bypass comes back.
+        let config = home.join(".codex/config.toml");
+        let edited = fs::read_to_string(&config)
+            .unwrap()
+            .replace("trusted_hash", "was_trusted_hash");
+        fs::write(&config, edited).unwrap();
+        let codex = codex_flags(&home, &nd7);
+        assert!(!codex.join(" ").contains("hook-prefix"));
+        assert!(codex.contains(&"--dangerously-bypass-hook-trust".to_owned()));
 
         fs::remove_dir_all(&home).unwrap();
     }
