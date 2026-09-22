@@ -815,6 +815,19 @@ mod tests {
                 .join(" ")
                 .contains(r#"{"sandbox":{"enabled":false}}"#)
         );
+        // Installed but not yet approved by the user: no hook on the command
+        // line, but the trust bypass stays until Codex has written its hashes.
+        let codex = codex_flags(&home, &nd7);
+        assert!(!codex.join(" ").contains("hook-prefix"));
+        assert!(codex.contains(&"--dangerously-bypass-hook-trust".to_owned()));
+        // Approved: Codex adds trusted_hash to every hook table.
+        let config = home.join(".codex/config.toml");
+        let approved = fs::read_to_string(&config)
+            .unwrap()
+            .replace("timeout = 30\n", "timeout = 30\ntrusted_hash = \"x\"\n")
+            .replace("timeout = 5\n", "timeout = 5\ntrusted_hash = \"x\"\n")
+            .replace("timeout = 3\n", "timeout = 3\ntrusted_hash = \"x\"\n");
+        fs::write(&config, approved).unwrap();
         let codex = codex_flags(&home, &nd7);
         assert!(!codex.join(" ").contains("hook-prefix"));
         assert!(!codex.contains(&"--dangerously-bypass-hook-trust".to_owned()));
