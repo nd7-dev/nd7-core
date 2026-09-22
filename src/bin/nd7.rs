@@ -239,6 +239,15 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
             "nd7 run: session {} under nd7's policy; a sandbox the program applies itself is refused{}",
             std::process::id(),
             match agent {
+                Some(Agent::Codex)
+                    if installed(Agent::Codex, &policy.home, &nd7)
+                        && !agent_config::codex_hooks_trusted(
+                            &policy.home.join(".codex/config.toml"),
+                            &nd7,
+                        ) =>
+                {
+                    " (hooks: installed, not yet trusted; start `command codex` once outside nd7 and approve them)"
+                }
                 Some(agent) if installed(agent, &policy.home, &nd7) => " (hooks: installed)",
                 Some(_) => " (hooks: per-invocation; run `nd7 init` to install them)",
                 None => "",
@@ -421,6 +430,7 @@ fn claude_flags(home: &std::path::Path, nd7: &std::path::Path) -> Vec<String> {
 #[cfg(target_os = "macos")]
 fn codex_flags(home: &std::path::Path, nd7: &std::path::Path) -> Vec<String> {
     let mut flags = vec!["-s".to_owned(), "danger-full-access".to_owned()];
+    let config = home.join(".codex/config.toml");
     if !installed(Agent::Codex, home, nd7) {
         let hook = agent_config::toml_string(&format!("{} hook-prefix", nd7.display()));
         flags.push("--dangerously-bypass-hook-trust".to_owned());
@@ -428,6 +438,10 @@ fn codex_flags(home: &std::path::Path, nd7: &std::path::Path) -> Vec<String> {
         flags.push(format!(
             r#"hooks.PreToolUse=[{{matcher="", hooks=[{{type="command", command={hook}, timeout=30}}]}}]"#
         ));
+    } else if !agent_config::codex_hooks_trusted(&config, nd7) {
+        // Installed but not yet approved. Codex records approval by writing
+        // config.toml, which the floor forbids, so it cannot happen here.
+        flags.push("--dangerously-bypass-hook-trust".to_owned());
     }
     flags.push("-c".to_owned());
     flags.push(format!(

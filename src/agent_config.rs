@@ -231,6 +231,45 @@ pub fn codex_has_hook(config: &Path, nd7: &Path) -> bool {
     codex_command(&text, "PreToolUse", |command| command == want)
 }
 
+/// Whether every nd7 hook in a Codex config carries the `trusted_hash` Codex
+/// writes when the user approves it. Codex approves hooks by rewriting
+/// `config.toml`, and under `nd7 run` that file is deliberately unwritable, so
+/// approval has to happen in a session nd7 did not start. Until it has, `nd7
+/// run` passes `--dangerously-bypass-hook-trust` and says so. False when the
+/// file has no nd7 hook at all.
+pub fn codex_hooks_trusted(config: &Path, nd7: &Path) -> bool {
+    let Ok(text) = fs::read_to_string(config) else {
+        return false;
+    };
+    let ours = format!("{} ", nd7.display());
+    let (mut found, mut all_trusted) = (false, true);
+    // One nd7 hook table at a time: its command, and whether a hash followed.
+    let (mut in_hooks_table, mut is_ours, mut trusted) = (false, false, false);
+    let mut close = |is_ours: bool, trusted: bool| {
+        if is_ours {
+            found = true;
+            all_trusted &= trusted;
+        }
+    };
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(header) = line.strip_prefix('[') {
+            close(is_ours, trusted);
+            let header = header.trim_matches(['[', ']']).trim();
+            in_hooks_table = header.starts_with("hooks.") && header.ends_with(".hooks");
+            (is_ours, trusted) = (false, false);
+        } else if in_hooks_table {
+            if let Some(command) = toml_command(line) {
+                is_ours = command.starts_with(&ours);
+            } else if line.starts_with("trusted_hash") {
+                trusted = true;
+            }
+        }
+    }
+    close(is_ours, trusted);
+    found && all_trusted
+}
+
 /// Writes `~/.nd7/aliases.sh`, one `alias <agent>='nd7 run <agent>'` per
 /// agent, and returns those lines. The alias names `nd7` rather than a path,
 /// so reinstalling nd7 keeps it working, and it does not recurse: `nd7 run`
@@ -606,6 +645,37 @@ mod tests {
             fs::read_to_string(&missing).unwrap(),
             format!("{SOURCE_LINE}\n")
         );
+    }
+
+    #[test]
+    fn codex_trust_is_per_nd7_hook() {
+        let dir = scratch("codex-trust");
+        let config = dir.join("config.toml");
+        let nd7 = Path::new("/opt/nd7");
+        assert!(!codex_hooks_trusted(&config, nd7), "no file");
+        install_codex(&config, nd7).unwrap();
+        assert!(
+            !codex_hooks_trusted(&config, nd7),
+            "installed, nothing approved"
+        );
+        // Codex approves by adding trusted_hash to each hook table. A foreign
+        // hook without one does not count against nd7's.
+        let approved = fs::read_to_string(&config)
+            .unwrap()
+            .replace("timeout = 30\n", "timeout = 30\ntrusted_hash = \"abc\"\n")
+            .replace("timeout = 5\n", "timeout = 5\ntrusted_hash = \"abc\"\n")
+            .replace("timeout = 3\n", "timeout = 3\ntrusted_hash = \"abc\"\n")
+            + "\n[[hooks.Stop]]\n\n[[hooks.Stop.hooks]]\ntype = \"command\"\ncommand = \"/other/tool\"\n";
+        fs::write(&config, approved).unwrap();
+        assert!(codex_hooks_trusted(&config, nd7));
+        // One nd7 hook left unapproved: not trusted.
+        let partial =
+            fs::read_to_string(&config)
+                .unwrap()
+                .replacen("trusted_hash = \"abc\"\n", "", 1);
+        fs::write(&config, partial).unwrap();
+        assert!(!codex_hooks_trusted(&config, nd7));
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
