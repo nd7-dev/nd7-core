@@ -294,7 +294,9 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
 routed through nd7-exec by a hook and run under the session's policy: the project directory is \
 writable, most of the rest of the filesystem is not, and only HTTPS egress is open. An \
 'operation not permitted' error is that policy, not Claude Code's permission rules. Do not try \
-to route around it; tell the user what was denied so they can run `nd7 allow <path>`.";
+to route around it; tell the user what was denied. `nd7 allow <path>` widens the policy for \
+Bash commands from the next call on; the Write, Edit and Read tools see only the fixed policy, \
+so for those the user must restart under a wider one.";
 
     // `--profile` is ours only before the program: from the program on, every
     // argument is the child's, including the ones that look like options.
