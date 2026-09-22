@@ -362,6 +362,7 @@ fn hook_prefix() -> ExitCode {
 /// again for the next command, so no restart is involved. Refuses paths under
 /// `~/.nd7`, which no policy may ever make writable.
 fn grant(verb: &str, mut args: impl Iterator<Item = String>) -> Result<String> {
+    use std::path::PathBuf;
     let (mut session, mut path) = (None, None);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -372,7 +373,14 @@ fn grant(verb: &str, mut args: impl Iterator<Item = String>) -> Result<String> {
             other => return Err(format!("unexpected argument `{other}`").into()),
         }
     }
-    let path = std::fs::canonicalize(path.ok_or("no path given")?)?;
+    let path = path.ok_or("no path given")?;
+    // `subpath` matches resolved paths, so grants are canonical. A grant whose
+    // directory has since gone can still be taken back, as recorded.
+    let path = match std::fs::canonicalize(&path) {
+        Ok(p) => p,
+        Err(_) if verb == "deny" => PathBuf::from(path),
+        Err(e) => return Err(format!("{path}: {e}").into()),
+    };
     let root = nd7_core::session::sessions_root()?;
     if path.starts_with(root.parent().unwrap_or(&root)) {
         return Err("nd7's own records can never be made writable".into());
