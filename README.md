@@ -68,6 +68,83 @@ The two binaries must stay next to each other: `nd7 run` finds `nd7-exec` by
 looking beside itself, and refuses to start if it is missing or writable by
 anyone but you.
 
+Then register nd7 with the agents, once:
+
+```sh
+nd7 init                     # both; `nd7 init claude` or `nd7 init codex` for one
+```
+
+That writes into `~/.claude/settings.json` and `~/.codex/config.toml`: one
+`record` hook per event, which is what the log is made of, and the `PreToolUse`
+hook that routes Bash through `nd7-exec`, so `nd7 run` no longer passes it per
+invocation. Everything already in those files is kept, and running it again
+writes nothing; an agent with no directory of its own under `~` is skipped.
+`--project` writes `.claude/settings.json` in this directory instead (Claude
+Code only). Codex asks you to trust the new hooks the first time you start it
+afterwards.
+
+`nd7 init` also writes `~/.nd7/aliases.sh` —
+
+```sh
+alias claude='nd7 run claude'
+alias codex='nd7 run codex'
+```
+
+— and adds one line to `~/.zshrc`, and to `~/.bashrc` if you have one, that
+loads it, so typing `claude` starts a sandboxed session. `--no-alias` skips
+that part. The aliases live under `~/.nd7`, which no session may write to, so
+a session cannot take them away, and they do not recurse: `nd7 run` looks its
+program up on `PATH`, where the shell's aliases do not reach.
+
+Outside `nd7 run` the installed `PreToolUse` hook stays silent — there is no
+session, so there is nothing to route a command through — and the `record`
+hooks go on recording.
+
+<details>
+<summary>What <code>nd7 init</code> writes for Claude Code</summary>
+
+`command` is the absolute path of the `nd7` that wrote it. That is **exec
+form** (`command` plus `args`): it skips the `sh -c` wrapper, which we measured
+at about 6 ms per hook, and it makes the recorded parent pid the `claude`
+process itself rather than an intermediate shell.
+
+```json
+{
+  "hooks": {
+    "SessionStart":       [{ "hooks": [{ "type": "command", "command": "nd7", "args": ["record"], "timeout": 5 }] }],
+    "UserPromptSubmit":   [{ "hooks": [{ "type": "command", "command": "nd7", "args": ["record"], "timeout": 5 }] }],
+    "PreToolUse":         [{ "hooks": [{ "type": "command", "command": "nd7", "args": ["record"], "timeout": 5 }] },
+                           { "matcher": "Bash", "hooks": [{ "type": "command", "command": "nd7 hook-prefix" }] }],
+    "PostToolUse":        [{ "hooks": [{ "type": "command", "command": "nd7", "args": ["record"], "timeout": 5 }] }],
+    "PostToolUseFailure": [{ "hooks": [{ "type": "command", "command": "nd7", "args": ["record"], "timeout": 5 }] }],
+    "Stop":               [{ "hooks": [{ "type": "command", "command": "nd7", "args": ["record"], "timeout": 5 }] }],
+    "SessionEnd":         [{ "hooks": [{ "type": "command", "command": "nd7", "args": ["record"], "timeout": 1 }] }]
+  }
+}
+```
+
+The same seven events go into `~/.codex/config.toml` as `[[hooks.<Event>]]`
+tables, where the command is one string, `nd7 record`.
+
+</details>
+
+Any of the other documented events (`SubagentStart`, `SubagentStop`,
+`Notification`, `PreCompact`, `CwdChanged`, …) can be added by hand the same
+way and will be recorded as `kind: hook`. Two are worth leaving out unless you
+need them: `MessageDisplay` fires per batch of streamed assistant text and was
+37% of all frames in a test session, and `PostToolBatch` repeats every tool
+response of a batch.
+
+Notes, from the Claude Code hooks reference (https://code.claude.com/docs/en/hooks):
+
+- Omitting `matcher` matches every tool. `timeout` is in seconds.
+- A hook that exits non-zero (other than 2) or times out does not block the
+  agent; the action proceeds. `nd7 record` never prints to stdout, so it cannot
+  make a control decision.
+- `SessionEnd` hooks share a 1.5 s budget, hence the shorter timeout.
+- Hook payloads carry no timestamp; `nd7` stamps events at invocation time,
+  before reading stdin.
+
 ## Sandbox (macOS)
 
 ```sh
@@ -89,9 +166,12 @@ nd7 run codex
 
 The same setup for Codex CLI: its own Seatbelt sandbox off with
 `-s danger-full-access` (the kernel refuses a second profile anyway, and this
-leaves Codex's approval prompts alone), the same `PreToolUse` hook, passed per
-invocation with `--dangerously-bypass-hook-trust`, and the same note as
-`developer_instructions`. For an unattended `codex exec`, add
+leaves Codex's approval prompts alone), the same `PreToolUse` hook, and the
+same note as `developer_instructions`. Without `nd7 init` the hook is passed
+per invocation, which needs `--dangerously-bypass-hook-trust` — only a hook
+Codex discovered in a configuration file carries the trust hash it checks — and
+Codex warns about it at every start; after `nd7 init` neither the flag nor the
+warning is there. For an unattended `codex exec`, add
 `-c approval_policy="never"` yourself; interactively, Codex keeps asking as it
 normally does.
 
@@ -137,43 +217,6 @@ machine whose Codex policy sets `allow_managed_hooks_only`, the per-invocation
 hook is refused and Codex runs under the floor alone; `ps` and `pgrep` are
 denied; Seatbelt filters network by port, not hostname; Linux is Tier 2 and
 not yet built.
-
-Register the hook in your Claude Code settings (`~/.claude/settings.json` for
-all projects, or `.claude/settings.json` in a project). Use **exec form**
-(`command` plus `args`): it skips the `sh -c` wrapper, which we measured at
-about 6 ms per hook, and it makes the recorded parent pid the `claude` process
-itself rather than an intermediate shell. One entry per event you want:
-
-```json
-{
-  "hooks": {
-    "SessionStart":       [{ "hooks": [{ "type": "command", "command": "nd7", "args": ["record"], "timeout": 5 }] }],
-    "UserPromptSubmit":   [{ "hooks": [{ "type": "command", "command": "nd7", "args": ["record"], "timeout": 5 }] }],
-    "PreToolUse":         [{ "hooks": [{ "type": "command", "command": "nd7", "args": ["record"], "timeout": 5 }] }],
-    "PostToolUse":        [{ "hooks": [{ "type": "command", "command": "nd7", "args": ["record"], "timeout": 5 }] }],
-    "PostToolUseFailure": [{ "hooks": [{ "type": "command", "command": "nd7", "args": ["record"], "timeout": 5 }] }],
-    "Stop":               [{ "hooks": [{ "type": "command", "command": "nd7", "args": ["record"], "timeout": 5 }] }],
-    "SessionEnd":         [{ "hooks": [{ "type": "command", "command": "nd7", "args": ["record"], "timeout": 1 }] }]
-  }
-}
-```
-
-Any of the other documented events (`SubagentStart`, `SubagentStop`,
-`Notification`, `PreCompact`, `CwdChanged`, …) can be added the same way and
-will be recorded as `kind: hook`. Two are worth leaving out unless you need
-them: `MessageDisplay` fires per batch of streamed assistant text and was 37%
-of all frames in a test session, and `PostToolBatch` repeats every tool
-response of a batch.
-
-Notes, from the Claude Code hooks reference (https://code.claude.com/docs/en/hooks):
-
-- Omitting `matcher` matches every tool. `timeout` is in seconds.
-- A hook that exits non-zero (other than 2) or times out does not block the
-  agent; the action proceeds. `nd7 record` never prints to stdout, so it cannot
-  make a control decision.
-- `SessionEnd` hooks share a 1.5 s budget, hence the shorter timeout.
-- Hook payloads carry no timestamp; `nd7` stamps events at invocation time,
-  before reading stdin.
 
 ## Read a session
 
@@ -238,6 +281,7 @@ src/policy.rs         a session's rules, rendered as the floor and the per-comma
 src/session.rs        the directory one `nd7 run` owns, where `nd7-exec` finds its policy
 src/sandbox.rs        Seatbelt: apply a profile in pre_exec, or to the calling process
 src/hook_prefix.rs    the PreToolUse reply that routes a Bash command through `nd7-exec`
+src/agent_config.rs   `nd7 init`: nd7's hooks in an agent's own config, and the shell aliases
 src/bin/nd7.rs        the command line; `record` is parse, transform, append; `run`, `allow`, `deny`
 src/bin/nd7-exec.rs   the one program the floor lets out: apply the policy, become the shell
 tests/                multi-process concurrency test and a fake vault, against the real binary
