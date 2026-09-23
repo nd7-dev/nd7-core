@@ -88,7 +88,7 @@ gets a stand-in `GNUPGHOME`:
 ```
 <short tmp dir>/            mode 700
   pubring.kbx  -> ~/.gnupg/pubring.kbx
-  trustdb.gpg  -> ~/.gnupg/trustdb.gpg
+  trustdb.gpg                a copy, private to the session
   gpg.conf     -> ~/.gnupg/gpg.conf
   S.gpg-agent  -> ~/.gnupg/S.gpg-agent.extra
 ```
@@ -112,14 +112,17 @@ Findings from wiring it by hand:
 - **Side effects.** `gpg: problem with fast path key listing: Forbidden - ignored` on every sign,
   harmless. Keyring writes (importing a key, `auto-key-retrieve`) go through the symlinks into
   `~/.gnupg` and are denied. Anything that passes `--pinentry-mode` fails.
-- **Listing keys fails, signing does not.** `gpg --list-keys` and `gpg --list-secret-keys` open
-  `trustdb.gpg` for writing, to show validity, and die with
-  `gpg: Fatal: can't open '~/.gnupg/trustdb.gpg': Operation not permitted`. Signing only reads it:
-  `gpg --status-fd=2 -bsau <key>`, as git calls it, printed `SIG_CREATED` under the same profile.
-  Seen in a real Codex session, which runs `gpg --list-secret-keys` as a pre-check before committing.
-  The trust database stays read-only: writable, a session could mark any key ultimately trusted. If a
-  trustdb check falls due (`gpg: next trustdb check due at …`), gpg may want to write during signing
-  too; `gpg --check-trustdb` once from outside clears it (not observed; none was due).
+- **The trust database is a copy, not a link.** gpg opens `trustdb.gpg` read-write whenever it
+  checks key validity: to list keys, and to pick the default key when no `-u` is given. With a
+  read-only file (`EACCES`) it prints `gpg: Note: trustdb not writable` and carries on; the sandbox
+  refuses with `EPERM`, which gpg does not expect, and it dies with
+  `gpg: Fatal: can't open '…/trustdb.gpg': Operation not permitted`. With the file linked into the
+  read-only `~/.gnupg`, `gpg --list-secret-keys` and `gpg --clearsign` without `-u` both failed,
+  while `-u <key>`, as git calls it, signed. Seen in real Codex sessions, which run both. A private
+  copy in the stand-in fixes both (measured under `nd7 run`). The real `trustdb.gpg` stays
+  unwritable; a session can mark a key trusted in its own copy only, which fools no one outside it,
+  and the copy goes with the stand-in when the session ends. Trust changed outside during a session
+  is seen from the next one.
 
 ## Open items
 - `use-keyboxd` (in `common.conf`, the default for new GnuPG 2.4 installs) replaces `pubring.kbx` with
