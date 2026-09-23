@@ -112,6 +112,11 @@ impl Policy {
 (allow network-outbound (literal "/private/var/run/mDNSResponder"))
 ;; A wildcard host with an exact port matches; a wildcard port would not.
 (allow network-outbound (remote tcp "*:443"))
+
+;; Allow binding to ports on localhost:* and using them.
+(allow network-bind (local ip "localhost:*"))
+(allow network-inbound (local ip "localhost:*"))
+(allow network-outbound (local ip "localhost:*"))
 "#,
             ssh = sbpl_string(&self.home.join(".ssh")),
             aws = sbpl_string(&self.home.join(".aws")),
