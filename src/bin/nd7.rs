@@ -22,8 +22,10 @@
 //! `sessions` and `show` arrive with milestone M5.
 
 use std::{
-    env,
+    env, fs,
     io::{self, Read},
+    os::unix::fs::{DirBuilderExt, symlink},
+    path::Path,
     process::ExitCode,
     time::Duration,
 };
@@ -221,6 +223,8 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
     /// The real thing: a session with this run's policy, and the floor
     /// rendered from it applied to the program and everything it spawns.
     fn spawn(program: &str, args: impl Iterator<Item = String>) -> Result<ExitStatus> {
+        use std::process::Command;
+
         use nd7_core::{policy::Policy, session::Session};
 
         let home = nd7_core::session::home()?;
@@ -233,6 +237,24 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
         };
         trusted(&policy.exit)?;
         let session = Session::create(&sessions_root(&policy.home), &policy)?;
+
+        // Get a GNUPGHOME for the sandboxed process
+        let _ = Command::new("gpgconf")
+            .args(["--launch", "gpg-agent"])
+            .status();
+        let gnupg = env::temp_dir().join(format!("nd7-gpg-{}", std::process::id()));
+        let gnupg = match env::var_os("GNUPGHOME") {
+            Some(_) => None, // The user's own choice. Leave it, it fails
+            None => match gpg_home(&policy.home, &gnupg) {
+                Ok(true) => Some(gnupg),
+                Ok(false) => None,
+                Err(e) => {
+                    eprintln!("nd7 run: gpg signing unavailable: {e}");
+                    None
+                }
+            },
+        };
+
         let nd7 = nd7_binary()?;
         let agent = agent_of(program);
         eprintln!(
@@ -253,10 +275,15 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
                 None => "",
             }
         );
+
         let mut cmd = nd7_core::sandbox::spawn_with_profile(&policy.render_floor(), program, &[]);
         // The hook nd7 installs runs for every session the agent starts, so it
         // needs to know which of them are nd7's.
         cmd.env("ND7_SESSION", std::process::id().to_string());
+        if let Some(dir) = &gnupg {
+            cmd.env("GNUPGHOME", dir);
+        }
+
         let args: Vec<String> = args.collect();
         match agent {
             Some(Agent::Claude) => {
@@ -282,6 +309,9 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
             }
         }
         let status = cmd.status()?;
+        if let Some(dir) = gnupg {
+            let _ = fs::remove_dir_all(dir);
+        }
         drop(session);
         Ok(status)
     }
@@ -751,6 +781,22 @@ fn parse_duration(s: &str) -> Result<Duration> {
     Ok(Duration::from_secs(seconds))
 }
 
+fn gpg_home(home: &Path, dir: &Path) -> io::Result<bool> {
+    let gnupg = home.join(".gnupg");
+    if !gnupg.is_dir() {
+        return Ok(false);
+    }
+    let _ = fs::remove_dir_all(dir);
+    fs::DirBuilder::new().mode(0o700).create(dir)?;
+    for name in ["pubring.kbx", "trustdb.gpg", "gpg.conf"] {
+        if gnupg.join(name).exists() {
+            symlink(gnupg.join(name), dir.join(name))?;
+        }
+    }
+    symlink(gnupg.join("S.gpg-agent.extra"), dir.join("S.gpg-agent"))?;
+    Ok(true)
+}
+
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
@@ -834,5 +880,49 @@ mod tests {
         assert!(codex.contains(&"--dangerously-bypass-hook-trust".to_owned()));
 
         fs::remove_dir_all(&home).unwrap();
+    }
+
+    /// The stand-in links the keyring files that exist, skips the ones that do
+    /// not, and points the agent socket at the restricted one.
+    #[test]
+    fn gpg_home_links_the_keyring_and_the_restricted_socket() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = env::temp_dir().join(format!("nd7-gpg-home-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join(".gnupg")).unwrap();
+        fs::write(root.join(".gnupg/pubring.kbx"), "").unwrap();
+        let dir = root.join("stand-in");
+
+        assert!(gpg_home(&root, &dir).unwrap());
+        assert_eq!(
+            fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::read_link(dir.join("S.gpg-agent")).unwrap(),
+            root.join(".gnupg/S.gpg-agent.extra")
+        );
+        assert_eq!(
+            fs::read_link(dir.join("pubring.kbx")).unwrap(),
+            root.join(".gnupg/pubring.kbx")
+        );
+        assert!(
+            !dir.join("gpg.conf").exists() && fs::symlink_metadata(dir.join("gpg.conf")).is_err()
+        );
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn gpg_home_without_gnupg_makes_nothing() {
+        let root = env::temp_dir().join(format!("nd7-gpg-none-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        assert!(!gpg_home(&root, &root.join("stand-in")).unwrap());
+        assert!(!root.join("stand-in").exists());
+
+        fs::remove_dir_all(&root).unwrap();
     }
 }
