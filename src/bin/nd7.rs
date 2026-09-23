@@ -781,9 +781,9 @@ fn parse_duration(s: &str) -> Result<Duration> {
     Ok(Duration::from_secs(seconds))
 }
 
-/// Makes `dir` a stand-in GNUPGHOME for a session: gpg finds its keyring,
-/// trust database and config there, all symlinks into `~/.gnupg`, and its
-/// agent socket, which is a symlink to gpg-agent's restricted socket, the
+/// Makes `dir` a stand-in GNUPGHOME for a session: gpg finds its keyring and
+/// config there, symlinks into `~/.gnupg`, a copy of its trust database, and
+/// its agent socket, which is a symlink to gpg-agent's restricted socket, the
 /// only one the profile lets a session reach. False when there is no
 /// `~/.gnupg`, so nothing to stand in for.
 #[cfg(target_os = "macos")]
@@ -799,10 +799,16 @@ fn gpg_home(home: &std::path::Path, dir: &std::path::Path) -> io::Result<bool> {
     }
     let _ = fs::remove_dir_all(dir);
     fs::DirBuilder::new().mode(0o700).create(dir)?;
-    for name in ["pubring.kbx", "trustdb.gpg", "gpg.conf"] {
+    for name in ["pubring.kbx", "gpg.conf"] {
         if gnupg.join(name).exists() {
             symlink(gnupg.join(name), dir.join(name))?;
         }
+    }
+    // A copy, not a link: gpg opens the trust database read-write even to list
+    // keys or pick the default one, and dies on the sandbox's EPERM, where it
+    // would fall back to read-only on EACCES. Changes stay in this session.
+    if gnupg.join("trustdb.gpg").exists() {
+        fs::copy(gnupg.join("trustdb.gpg"), dir.join("trustdb.gpg"))?;
     }
     symlink(gnupg.join("S.gpg-agent.extra"), dir.join("S.gpg-agent"))?;
     Ok(true)
@@ -894,7 +900,8 @@ mod tests {
     }
 
     /// The stand-in links the keyring files that exist, skips the ones that do
-    /// not, and points the agent socket at the restricted one.
+    /// not, copies the trust database, and points the agent socket at the
+    /// restricted one.
     #[test]
     fn gpg_home_links_the_keyring_and_the_restricted_socket() {
         use std::os::unix::fs::PermissionsExt;
@@ -903,6 +910,7 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join(".gnupg")).unwrap();
         fs::write(root.join(".gnupg/pubring.kbx"), "").unwrap();
+        fs::write(root.join(".gnupg/trustdb.gpg"), "trust").unwrap();
         let dir = root.join("stand-in");
 
         assert!(gpg_home(&root, &dir).unwrap());
@@ -918,6 +926,14 @@ mod tests {
             fs::read_link(dir.join("pubring.kbx")).unwrap(),
             root.join(".gnupg/pubring.kbx")
         );
+        let trustdb = dir.join("trustdb.gpg");
+        assert!(
+            fs::symlink_metadata(&trustdb)
+                .unwrap()
+                .file_type()
+                .is_file()
+        );
+        assert_eq!(fs::read_to_string(&trustdb).unwrap(), "trust");
         assert!(
             !dir.join("gpg.conf").exists() && fs::symlink_metadata(dir.join("gpg.conf")).is_err()
         );
