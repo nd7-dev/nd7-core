@@ -30,6 +30,7 @@ pub struct Policy {
     pub project: PathBuf,
     /// The user's home, from passwd. Only used to locate `~/.ssh`, `~/.aws`,
     /// `~/.nd7`, `~/.claude` and `~/.codex`; it is never writable as a whole.
+    /// It also allows one special restricted socket for gnupg for signing.
     pub home: PathBuf,
     /// The canonical `std::env::temp_dir()`.
     pub tmp: PathBuf,
@@ -117,6 +118,10 @@ impl Policy {
 (allow network-bind (local ip "localhost:*"))
 (allow network-inbound (local ip "localhost:*"))
 (allow network-outbound (local ip "localhost:*"))
+
+;; Allow socket outbound traffic to the gpg_agent
+;; Here we allow only reaching a restricted socket. Never the main one.
+(allow network-outbound (literal {gpg_agent}))
 "#,
             ssh = sbpl_string(&self.home.join(".ssh")),
             aws = sbpl_string(&self.home.join(".aws")),
@@ -124,6 +129,7 @@ impl Policy {
             project = sbpl_string(&self.project),
             tmp = sbpl_string(&self.tmp),
             home = sbpl_string(&self.home),
+            gpg_agent = sbpl_string(&self.home.join(".gnupg/S.gpg-agent.extra"))
         )
     }
 
@@ -211,6 +217,15 @@ mod tests {
 (allow network-outbound (literal "/private/var/run/mDNSResponder"))
 ;; A wildcard host with an exact port matches; a wildcard port would not.
 (allow network-outbound (remote tcp "*:443"))
+
+;; Allow binding to ports on localhost:* and using them.
+(allow network-bind (local ip "localhost:*"))
+(allow network-inbound (local ip "localhost:*"))
+(allow network-outbound (local ip "localhost:*"))
+
+;; Allow socket outbound traffic to the gpg_agent
+;; Here we allow only reaching a restricted socket. Never the main one.
+(allow network-outbound (literal "/Users/ada/.gnupg/S.gpg-agent.extra"))
 "#;
 
     /// The last rule of both renderings, for the policy `sample` returns.
