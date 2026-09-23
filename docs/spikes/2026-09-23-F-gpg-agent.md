@@ -112,6 +112,14 @@ Findings from wiring it by hand:
 - **Side effects.** `gpg: problem with fast path key listing: Forbidden - ignored` on every sign,
   harmless. Keyring writes (importing a key, `auto-key-retrieve`) go through the symlinks into
   `~/.gnupg` and are denied. Anything that passes `--pinentry-mode` fails.
+- **Listing keys fails, signing does not.** `gpg --list-keys` and `gpg --list-secret-keys` open
+  `trustdb.gpg` for writing, to show validity, and die with
+  `gpg: Fatal: can't open '~/.gnupg/trustdb.gpg': Operation not permitted`. Signing only reads it:
+  `gpg --status-fd=2 -bsau <key>`, as git calls it, printed `SIG_CREATED` under the same profile.
+  Seen in a real Codex session, which runs `gpg --list-secret-keys` as a pre-check before committing.
+  The trust database stays read-only: writable, a session could mark any key ultimately trusted. If a
+  trustdb check falls due (`gpg: next trustdb check due at …`), gpg may want to write during signing
+  too; `gpg --check-trustdb` once from outside clears it (not observed; none was due).
 
 ## Open items
 - `use-keyboxd` (in `common.conf`, the default for new GnuPG 2.4 installs) replaces `pubring.kbx` with
