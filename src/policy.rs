@@ -121,6 +121,10 @@ impl Policy {
 
 ;; Allow socket outbound traffic to the gpg_agent
 ;; Here we allow only reaching a restricted socket. Never the main one.
+;; gpg signs through gpg-agent's socket. Only the restricted one: it refuses
+;; key export, loopback pinentry and agent control, which the main socket
+;; S.gpg-agent would all allow. Nothing in ~/.gnupg is writable, because the
+;; agent runs the programs its config names outside this sandbox.
 (allow network-outbound (literal {gpg_agent}))
 "#,
             ssh = sbpl_string(&self.home.join(".ssh")),
@@ -225,6 +229,10 @@ mod tests {
 
 ;; Allow socket outbound traffic to the gpg_agent
 ;; Here we allow only reaching a restricted socket. Never the main one.
+;; gpg signs through gpg-agent's socket. Only the restricted one: it refuses
+;; key export, loopback pinentry and agent control, which the main socket
+;; S.gpg-agent would all allow. Nothing in ~/.gnupg is writable, because the
+;; agent runs the programs its config names outside this sandbox.
 (allow network-outbound (literal "/Users/ada/.gnupg/S.gpg-agent.extra"))
 "#;
 
