@@ -29,8 +29,8 @@ pub struct Policy {
     /// one place the agent may write from the start.
     pub project: PathBuf,
     /// The user's home, from passwd. Only used to locate `~/.ssh`, `~/.aws`,
-    /// `~/.nd7`, `~/.claude` and `~/.codex`; it is never writable as a whole.
-    /// It also allows one special restricted socket for gnupg for signing.
+    /// `~/.nd7`, `~/.claude`, `~/.codex` and gpg-agent's restricted socket in
+    /// `~/.gnupg`; it is never writable as a whole.
     pub home: PathBuf,
     /// The canonical `std::env::temp_dir()`.
     pub tmp: PathBuf,
@@ -119,8 +119,6 @@ impl Policy {
 (allow network-inbound (local ip "localhost:*"))
 (allow network-outbound (local ip "localhost:*"))
 
-;; Allow socket outbound traffic to the gpg_agent
-;; Here we allow only reaching a restricted socket. Never the main one.
 ;; gpg signs through gpg-agent's socket. Only the restricted one: it refuses
 ;; key export, loopback pinentry and agent control, which the main socket
 ;; S.gpg-agent would all allow. Nothing in ~/.gnupg is writable, because the
@@ -133,7 +131,7 @@ impl Policy {
             project = sbpl_string(&self.project),
             tmp = sbpl_string(&self.tmp),
             home = sbpl_string(&self.home),
-            gpg_agent = sbpl_string(&self.home.join(".gnupg/S.gpg-agent.extra"))
+            gpg_agent = sbpl_string(&self.home.join(".gnupg/S.gpg-agent.extra")),
         )
     }
 
@@ -227,8 +225,6 @@ mod tests {
 (allow network-inbound (local ip "localhost:*"))
 (allow network-outbound (local ip "localhost:*"))
 
-;; Allow socket outbound traffic to the gpg_agent
-;; Here we allow only reaching a restricted socket. Never the main one.
 ;; gpg signs through gpg-agent's socket. Only the restricted one: it refuses
 ;; key export, loopback pinentry and agent control, which the main socket
 ;; S.gpg-agent would all allow. Nothing in ~/.gnupg is writable, because the
@@ -342,7 +338,11 @@ mod tests {
         //! judge of whether they compile and of what they permit.
 
         use super::*;
-        use std::{fs, process::Output};
+        use std::{
+            fs,
+            os::unix::net::UnixListener,
+            process::{Command, Output, Stdio},
+        };
 
         /// A fresh empty directory for one test, named after the test and
         /// this pid. Canonical, because `subpath` matches resolved paths.
@@ -402,6 +402,62 @@ mod tests {
                 exit: PathBuf::from("/usr/bin/true"),
                 grants,
             }
+        }
+
+        /// Serves `path` by accepting and closing every connection, so a client
+        /// such as `nc -U` sees EOF and exits instead of waiting.
+        fn listen(path: &Path) {
+            let listener = UnixListener::bind(path).unwrap();
+            std::thread::spawn(move || {
+                for conn in listener.incoming() {
+                    drop(conn);
+                }
+            });
+        }
+
+        /// Whether `nc -U path` connects under `profile`.
+        fn connects(profile: &str, path: &Path) -> bool {
+            crate::sandbox::spawn_with_profile(profile, "/usr/bin/nc", &[])
+                .arg("-U")
+                .arg(path)
+                .stdin(Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        }
+
+        #[test]
+        fn a_session_reaches_the_restricted_gpg_socket_and_not_the_main_one() {
+            // Not `scratch`: under the canonical temp dir the socket path is 102
+            // bytes, one name change away from macOS's limit of 103.
+            let root = PathBuf::from(format!("/private/tmp/nd7-gpg-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir_all(root.join(".gnupg")).unwrap();
+            let extra = root.join(".gnupg/S.gpg-agent.extra");
+            let main = root.join(".gnupg/S.gpg-agent");
+
+            listen(&extra);
+            listen(&main);
+
+            // Outside the sandbox the main socket answers, so a refusal below
+            // is the profile's doing and not a missing listener.
+            assert!(
+                Command::new("/usr/bin/nc")
+                    .arg("-U")
+                    .arg(&main)
+                    .stdin(Stdio::null())
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+
+            let policy = over(&root, Vec::new());
+            for profile in [policy.render_floor(), policy.render_policy()] {
+                assert!(connects(&profile, &extra));
+                assert!(!connects(&profile, &main));
+            }
+
+            fs::remove_dir_all(&root).unwrap();
         }
 
         #[test]
