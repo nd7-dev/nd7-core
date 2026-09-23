@@ -22,10 +22,8 @@
 //! `sessions` and `show` arrive with milestone M5.
 
 use std::{
-    env, fs,
+    env,
     io::{self, Read},
-    os::unix::fs::{DirBuilderExt, symlink},
-    path::Path,
     process::ExitCode,
     time::Duration,
 };
@@ -223,7 +221,7 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
     /// The real thing: a session with this run's policy, and the floor
     /// rendered from it applied to the program and everything it spawns.
     fn spawn(program: &str, args: impl Iterator<Item = String>) -> Result<ExitStatus> {
-        use std::process::Command;
+        use std::{fs, process::Command};
 
         use nd7_core::{policy::Policy, session::Session};
 
@@ -238,13 +236,15 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
         trusted(&policy.exit)?;
         let session = Session::create(&sessions_root(&policy.home), &policy)?;
 
-        // Get a GNUPGHOME for the sandboxed process
+        // A sandboxed gpg cannot start an agent, so start it while we still can.
         let _ = Command::new("gpgconf")
             .args(["--launch", "gpg-agent"])
             .status();
         let gnupg = env::temp_dir().join(format!("nd7-gpg-{}", std::process::id()));
         let gnupg = match env::var_os("GNUPGHOME") {
-            Some(_) => None, // The user's own choice. Leave it, it fails
+            // The user's own choice. Leave it: gpg then looks for the agent
+            // in that directory, the profile denies it, and signing fails closed.
+            Some(_) => None,
             None => match gpg_home(&policy.home, &gnupg) {
                 Ok(true) => Some(gnupg),
                 Ok(false) => None,
@@ -781,7 +781,18 @@ fn parse_duration(s: &str) -> Result<Duration> {
     Ok(Duration::from_secs(seconds))
 }
 
-fn gpg_home(home: &Path, dir: &Path) -> io::Result<bool> {
+/// Makes `dir` a stand-in GNUPGHOME for a session: gpg finds its keyring,
+/// trust database and config there, all symlinks into `~/.gnupg`, and its
+/// agent socket, which is a symlink to gpg-agent's restricted socket, the
+/// only one the profile lets a session reach. False when there is no
+/// `~/.gnupg`, so nothing to stand in for.
+#[cfg(target_os = "macos")]
+fn gpg_home(home: &std::path::Path, dir: &std::path::Path) -> io::Result<bool> {
+    use std::{
+        fs,
+        os::unix::fs::{DirBuilderExt, symlink},
+    };
+
     let gnupg = home.join(".gnupg");
     if !gnupg.is_dir() {
         return Ok(false);
