@@ -9,25 +9,25 @@ format is the contract.
 ## Phase 1: what this repo does today
 
 - A library crate, `nd7_core`, and one binary, `nd7`, whose `record` command
-  is what Claude Code hooks call.
-- Every hook invocation reads the hook JSON from stdin, parses it into a typed
+  Claude Code hooks call.
+- Every hook invocation reads the JSON from stdin, parses it into a typed
   model of all 33 documented Claude Code hook events, transforms it into one
   nd7 event, and appends it as one NDJSON line to the session's log under an
   XDG state directory.
-- Appends are serialized with an advisory lock per session, so Claude Code's
-  parallel tool calls cannot produce duplicate sequence numbers. Verified by a
-  test that fires 40 hook processes at one session at once.
+- An advisory lock per session serializes appends, so Claude Code's parallel
+  tool calls cannot produce duplicate sequence numbers. A test that fires 40
+  hook processes at one session at once checks it.
 - Six event kinds have typed bodies: `session_start`, `prompt`, `tool_call`,
-  `tool_result` (success and failure), `session_end`, `turn_end`. Every other
-  hook event is kept whole under `kind: hook`, so a Claude Code upgrade never
-  loses data.
+  `tool_result` (success and failure), `session_end`, `turn_end`. `nd7` keeps
+  every other hook event whole under `kind: hook`, so a Claude Code upgrade
+  never loses data.
 - Frames are hash-chained. Each frame ends with its BLAKE3 `hash`, computed
   over the exact bytes written, and carries `prev`, the hash of the frame
   before it; the first frame's `prev` is the hash of the session id. A `head`
   sidecar holds the last `seq` and `hash`, so an append reads two small files
   instead of scanning the log.
 - `nd7 verify <session-id>` walks the chain and exits 1 at the first break,
-  naming the frame. Each frame is checked independently against its own bytes
+  naming the frame. It checks each frame independently against its own bytes
   and the previous frame's stored hash, so the walk can be parallelised later
   without changing the checks. `append` repairs a `head` left one frame behind
   by an interrupted write, and refuses to append onto any other
@@ -61,8 +61,8 @@ cargo install --locked --git https://github.com/nd7-dev/nd7-core
 
 From a checkout, `cargo install --locked --path .` does the same. For
 development, symlink `~/.cargo/bin/nd7` and `~/.cargo/bin/nd7-exec` to the
-`target/debug/` binaries instead; hooks are spawned fresh per event, so every
-`cargo build` is picked up by the next hook without restarting Claude Code.
+`target/debug/` binaries instead; the agent spawns a hook fresh per event, so
+the next hook picks up every `cargo build` without restarting Claude Code.
 
 The two binaries must stay next to each other: `nd7 run` finds `nd7-exec` by
 looking beside itself, and refuses to start if it is missing or writable by
@@ -77,8 +77,8 @@ nd7 init                     # both; `nd7 init claude` or `nd7 init codex` for o
 That writes into `~/.claude/settings.json` and `~/.codex/config.toml`: one
 `record` hook per event, which is what the log is made of, and the `PreToolUse`
 hook that routes Bash through `nd7-exec`, so `nd7 run` no longer passes it per
-invocation. Everything already in those files is kept, and running it again
-writes nothing; an agent with no directory of its own under `~` is skipped.
+invocation. It keeps everything already in those files, writes nothing on a
+second run, and skips an agent with no directory of its own under `~`.
 `--project` writes `.claude/settings.json` in this directory instead (Claude
 Code only). It also records Codex's approval of the hooks it wrote — the hash
 Codex stores when you accept them — so Codex does not ask about them at its
@@ -130,12 +130,12 @@ where the command is one string, `nd7 record`; Codex has no
 
 </details>
 
-Any of the other documented events (`SubagentStart`, `SubagentStop`,
-`Notification`, `PreCompact`, `CwdChanged`, …) can be added by hand the same
-way and will be recorded as `kind: hook`. Two are worth leaving out unless you
-need them: `MessageDisplay` fires per batch of streamed assistant text and was
-37% of all frames in a test session, and `PostToolBatch` repeats every tool
-response of a batch.
+You can add any of the other documented events (`SubagentStart`,
+`SubagentStop`, `Notification`, `PreCompact`, `CwdChanged`, …) by hand the
+same way, and `nd7` records them as `kind: hook`. Two are worth leaving out
+unless you need them: `MessageDisplay` fires per batch of streamed assistant
+text and was 37% of all frames in a test session, and `PostToolBatch` repeats
+every tool response of a batch.
 
 Notes, from the Claude Code hooks reference (https://code.claude.com/docs/en/hooks):
 
@@ -158,8 +158,8 @@ That is the whole setup. `nd7 run` applies a Seatbelt profile to `claude` and
 every process it spawns, then starts it with the flags it needs: a
 `PreToolUse` hook that routes every Bash command through `nd7-exec`, its own
 sandbox turned off (the kernel refuses a second profile anyway), and one
-paragraph in the system prompt so a denial is reported as nd7's policy rather
-than as Claude Code's permission rules. Nothing in your Claude Code settings
+paragraph in the system prompt so Claude Code reports a denial as nd7's policy
+rather than as its own permission rules. Nothing in your Claude Code settings
 changes; the flags apply to that session only.
 
 ```sh
@@ -169,11 +169,11 @@ nd7 run codex
 The same setup for Codex CLI: its own Seatbelt sandbox off with
 `-s danger-full-access` (the kernel refuses a second profile anyway, and this
 leaves Codex's approval prompts alone), the same `PreToolUse` hook, and the
-same note as `developer_instructions`. Without `nd7 init` the hook is passed
-per invocation, which needs `--dangerously-bypass-hook-trust` — only a hook
-Codex discovered in a configuration file carries the trust hash it checks — and
-Codex warns about it at every start; after `nd7 init` neither the flag nor the
-warning is there. For an unattended `codex exec`, add
+same note as `developer_instructions`. Without `nd7 init`, `nd7 run` passes
+the hook per invocation, which needs `--dangerously-bypass-hook-trust` — only
+a hook Codex discovered in a configuration file carries the trust hash it
+checks — and Codex warns about it at every start; after `nd7 init` neither
+the flag nor the warning is there. For an unattended `codex exec`, add
 `-c approval_policy="never"` yourself; interactively, Codex keeps asking as it
 normally does.
 
@@ -200,23 +200,23 @@ No restart. Grants are per session and vanish when it ends. Paths under
 `~/.nd7` can never be granted. If several sessions are running, add
 `--session <pid>`; the pid is printed when `nd7 run` starts.
 
-How it holds. The profile is applied once, to the whole process tree, and
-the kernel lets a confined process apply no other profile, so nothing inside
-can loosen it: not the model, not a compromised dependency, not Claude
+How it holds. `nd7 run` applies the profile once, to the whole process tree,
+and the kernel lets a confined process apply no other profile, so nothing
+inside can loosen it: not the model, not a compromised dependency, not Claude
 Code's own sandbox. The one program allowed out is `nd7-exec`, which applies
 the session's current policy to itself and becomes the shell for the command;
 it takes nothing from the caller's arguments, cwd or environment, and it
-refuses to run at all if it cannot find its session or its policy. A command
-that skips the prefix runs under the floor, which is never wider. The full
-argument, with the measurements and the alternatives that were rejected, is
-in [docs/DECISIONS.md](docs/DECISIONS.md) (ADR-0007) and the spike reports
+refuses to run if it cannot find its session or its policy. A command that
+skips the prefix runs under the floor, which is never wider. The full
+argument, with the measurements and the rejected alternatives, is in
+[docs/DECISIONS.md](docs/DECISIONS.md) (ADR-0007) and the spike reports
 under [docs/spikes/](docs/spikes/).
 
 Known limits: Write and Edit run inside the `claude` process, so `nd7 allow`
 widens Bash but not those tools (restart `nd7 run claude --resume <id>` for
 that), and Codex's `apply_patch` sees only the floor in the same way; on a
-machine whose Codex policy sets `allow_managed_hooks_only`, the per-invocation
-hook is refused and Codex runs under the floor alone; `ps` and `pgrep` are
+machine whose Codex policy sets `allow_managed_hooks_only`, Codex refuses the
+per-invocation hook and runs under the floor alone; `ps` and `pgrep` are
 denied; Seatbelt filters network by port, not hostname; Linux is Tier 2 and
 not yet built.
 
@@ -236,9 +236,9 @@ tail -f ~/.local/state/nd7/sessions/<session-id>/events.ndjson \
 nd7 verify <session-id>   # recompute the hash chain, exit 1 at the first break
 ```
 
-A clean result proves only that the log has not been edited since its last
-frame was written by this machine; anyone with write access could still
-rewrite the whole chain.
+A clean result proves only that nobody has edited the log since this machine
+wrote its last frame; anyone with write access could still rewrite the whole
+chain.
 
 ## Ship to a vault
 
@@ -247,8 +247,8 @@ copy on a machine the agent cannot reach does. `nd7 enroll` binds this
 machine to a vault: it generates the signing key that authenticates every
 request, checks the vault's admin public keys against the fingerprint
 embedded in the enrolment token, and refuses to store anything if they
-disagree. Nothing is sent to a vault until that succeeds, and `nd7 record`
-never talks to the network either way.
+disagree. `nd7 ship` sends nothing to a vault until that succeeds, and
+`nd7 record` never talks to the network either way.
 
 ```sh
 nd7 enroll https://vault.example.com <token>   # --rotate to replace the key
@@ -310,6 +310,6 @@ the measurements behind that and behind not running a daemon.
 Pre-alpha. The schema is a draft and will change until it is marked `v1`.
 Frames carry `prev` and `hash`, and `nd7 verify` checks them. The sandbox
 is new and tested on macOS 26 with Claude Code 2.1.x; the policy will
-tighten as recorded sessions show what is actually needed.
+tighten as recorded sessions show what is needed.
 
 Licence: MIT. See [LICENSE](LICENSE).
