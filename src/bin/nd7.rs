@@ -226,8 +226,14 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
         use nd7_core::{policy::Policy, session::Session};
 
         let home = nd7_core::session::home()?;
+        // `nd7-exec` never resolves this again; it applies the profile as
+        // rendered here. Created first, because `subpath` matches resolved
+        // paths and a path that does not exist cannot be canonicalized.
+        let state = nd7_core::session_log::state_root()?;
+        fs::create_dir_all(&state)?;
         let policy = Policy {
             project: env::current_dir()?.canonicalize()?,
+            state: state.canonicalize()?,
             tmp: env::temp_dir().canonicalize()?,
             exit: exit_path()?,
             home,
@@ -654,7 +660,8 @@ fn init_agents(args: impl Iterator<Item = String>) -> Result<()> {
 /// `nd7 allow <path>` and `nd7 deny <path>`: add or remove a write root in a
 /// running session's policy. Only the record changes; `nd7-exec` reads it
 /// again for the next command, so no restart is involved. Refuses paths under
-/// `~/.nd7`, which no policy may ever make writable.
+/// `~/.nd7` and under the nd7 state root, the two places holding nd7's own
+/// records, which no policy may ever make writable.
 fn grant(verb: &str, mut args: impl Iterator<Item = String>) -> Result<String> {
     use std::path::PathBuf;
     let (mut session, mut path) = (None, None);
@@ -676,7 +683,9 @@ fn grant(verb: &str, mut args: impl Iterator<Item = String>) -> Result<String> {
         Err(e) => return Err(format!("{path}: {e}").into()),
     };
     let root = nd7_core::session::sessions_root()?;
-    if path.starts_with(root.parent().unwrap_or(&root)) {
+    if path.starts_with(root.parent().unwrap_or(&root))
+        || path.starts_with(nd7_core::session_log::state_root()?)
+    {
         return Err("nd7's own records can never be made writable".into());
     }
     let pid = match session {

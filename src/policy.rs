@@ -10,10 +10,11 @@
 //!   becomes the shell for one command. Same body, plus the grants, and no
 //!   way out.
 //!
-//! Both end with the same two per-operation denies: nd7's own records, so no
-//! grant and no later rule can make the flight recorder writable, and the
-//! agents' own configuration files, so a session cannot change the hooks or
-//! the sandbox settings the sessions after it start with.
+//! Both end with the same two per-operation denies: nd7's own records, the
+//! session directories under `~/.nd7` and the state root that holds the
+//! flight recorder and the vault, so no grant and no later rule can make them
+//! writable; and the agents' own configuration files, so a session cannot
+//! change the hooks or the sandbox settings the sessions after it start with.
 //!
 //! This module only renders text; the paths come from the caller, already
 //! canonical, because Seatbelt's `subpath` matches resolved paths.
@@ -32,6 +33,10 @@ pub struct Policy {
     /// `~/.nd7`, `~/.claude`, `~/.codex` and gpg-agent's restricted socket in
     /// `~/.gnupg`; it is never writable as a whole.
     pub home: PathBuf,
+    /// The canonical nd7 state root, `$XDG_STATE_HOME/nd7`: the flight
+    /// recorder's session logs, and the vault's files under `vault`,
+    /// including the machine's Ed25519 signing seed.
+    pub state: PathBuf,
     /// The canonical `std::env::temp_dir()`.
     pub tmp: PathBuf,
     /// The `nd7-exec` binary the floor lets out of the sandbox.
@@ -98,9 +103,10 @@ impl Policy {
 (allow sysctl-read)
 (allow file-ioctl)                      ; terminals: window size, raw mode
 
-;; Reading is open; credentials and nd7's own records are not.
+;; Reading is open; credentials and the vault's keys are not. The session log
+;; beside the vault stays readable: it is the user's own record of the run.
 (allow file-read*)
-(deny file-read* file-read-data file-read-metadata file-read-xattr (subpath {ssh}) (subpath {aws}) )
+(deny file-read* file-read-data file-read-metadata file-read-xattr (subpath {ssh}) (subpath {aws}) (subpath {vault}))
 
 ;; Writable: the project, the temp dir, Claude Code's scratch directories, and
 ;; each agent's own state, `~/.claude` and `~/.codex`. HOME is matched as a
@@ -127,6 +133,7 @@ impl Policy {
 "#,
             ssh = sbpl_string(&self.home.join(".ssh")),
             aws = sbpl_string(&self.home.join(".aws")),
+            vault = sbpl_string(&self.state.join("vault")),
             project = sbpl_string(&self.project),
             tmp = sbpl_string(&self.tmp),
             home = sbpl_string(&self.home),
@@ -140,10 +147,12 @@ impl Policy {
         format!(
             "
 ;; Last, so the last match wins: nd7's own records stay unwritable, whatever
-;; the rules above allow.
-(deny {WRITE_OPS} (subpath {records}))
+;; the rules above allow: the session directories `nd7-exec` reads its policy
+;; from, and the state root holding the flight recorder and the vault.
+(deny {WRITE_OPS} (subpath {records}) (subpath {state}))
 ",
-            records = sbpl_string(&self.home.join(".nd7"))
+            records = sbpl_string(&self.home.join(".nd7")),
+            state = sbpl_string(&self.state),
         )
     }
 
@@ -203,9 +212,10 @@ mod tests {
 (allow sysctl-read)
 (allow file-ioctl)                      ; terminals: window size, raw mode
 
-;; Reading is open; credentials and nd7's own records are not.
+;; Reading is open; credentials and the vault's keys are not. The session log
+;; beside the vault stays readable: it is the user's own record of the run.
 (allow file-read*)
-(deny file-read* file-read-data file-read-metadata file-read-xattr (subpath "/Users/ada/.ssh") (subpath "/Users/ada/.aws") (subpath "/Users/ada/.nd7"))
+(deny file-read* file-read-data file-read-metadata file-read-xattr (subpath "/Users/ada/.ssh") (subpath "/Users/ada/.aws") (subpath "/Users/ada/.local/state/nd7/vault"))
 
 ;; Writable: the project, the temp dir, Claude Code's scratch directories, and
 ;; each agent's own state, `~/.claude` and `~/.codex`. HOME is matched as a
@@ -234,8 +244,9 @@ mod tests {
     /// The last rule of both renderings, for the policy `sample` returns.
     const DENY_RECORDS: &str = r#"
 ;; Last, so the last match wins: nd7's own records stay unwritable, whatever
-;; the rules above allow.
-(deny file-write* file-write-acl file-write-create file-write-data file-write-flags file-write-mode file-write-owner file-write-setugid file-write-unlink file-write-xattr file-link (subpath "/Users/ada/.nd7"))
+;; the rules above allow: the session directories `nd7-exec` reads its policy
+;; from, and the state root holding the flight recorder and the vault.
+(deny file-write* file-write-acl file-write-create file-write-data file-write-flags file-write-mode file-write-owner file-write-setugid file-write-unlink file-write-xattr file-link (subpath "/Users/ada/.nd7") (subpath "/Users/ada/.local/state/nd7"))
 "#;
 
     /// The rule after that one, for the policy `sample` returns.
@@ -249,6 +260,7 @@ mod tests {
         Policy {
             project: PathBuf::from("/Users/ada/proj"),
             home: PathBuf::from("/Users/ada"),
+            state: PathBuf::from("/Users/ada/.local/state/nd7"),
             tmp: PathBuf::from("/private/tmp"),
             exit: PathBuf::from("/usr/local/bin/nd7-exec"),
             grants: Vec::new(),
@@ -371,6 +383,15 @@ mod tests {
                 .unwrap()
         }
 
+        /// `cat target` under `profile`, with the path kept out of the script
+        /// for the same reason as in [`write_probe`].
+        fn read_probe(profile: &str, target: &Path) -> Output {
+            crate::sandbox::spawn_with_profile(profile, "/bin/sh", &[])
+                .args(["-c", r#"cat "$1""#, "_", &target.to_string_lossy()])
+                .output()
+                .unwrap()
+        }
+
         fn assert_denied(profile: &str, target: &Path) {
             let out = write_probe(profile, target);
             let stderr = String::from_utf8_lossy(&out.stderr);
@@ -397,6 +418,7 @@ mod tests {
             Policy {
                 project: home.join("proj"),
                 home: home.to_path_buf(),
+                state: home.join(".local/state/nd7"),
                 tmp: PathBuf::from("/private/tmp"),
                 exit: PathBuf::from("/usr/bin/true"),
                 grants,
@@ -482,10 +504,13 @@ mod tests {
         #[test]
         fn a_grant_over_home_still_cannot_write_the_records() {
             let root = scratch("grant-home");
+            let policy = over(&root, vec![root.clone()]);
             fs::create_dir_all(root.join(".nd7")).unwrap();
-            let profile = over(&root, vec![root.clone()]).render_policy();
+            fs::create_dir_all(&policy.state).unwrap();
+            let profile = policy.render_policy();
 
             assert_denied(&profile, &root.join(".nd7/probe"));
+            assert_denied(&profile, &policy.state.join("probe"));
             assert_allowed(&profile, &root.join("elsewhere"));
 
             fs::remove_dir_all(&root).unwrap();
@@ -508,17 +533,37 @@ mod tests {
         #[test]
         fn the_floor_cannot_write_the_records_either() {
             let root = scratch("floor-home");
-            fs::create_dir_all(root.join(".nd7")).unwrap();
             // The project is the home here, so the write rule above covers
-            // `.nd7` and only the final deny can stop it.
-            let profile = Policy {
+            // both records directories and only the final deny can stop it.
+            let policy = Policy {
                 project: root.clone(),
                 ..over(&root, Vec::new())
-            }
-            .render_floor();
+            };
+            fs::create_dir_all(root.join(".nd7")).unwrap();
+            fs::create_dir_all(&policy.state).unwrap();
+            let profile = policy.render_floor();
 
             assert_denied(&profile, &root.join(".nd7/probe"));
+            assert_denied(&profile, &policy.state.join("probe"));
             assert_allowed(&profile, &root.join("elsewhere"));
+
+            fs::remove_dir_all(&root).unwrap();
+        }
+
+        #[test]
+        fn a_session_reads_its_log_but_not_the_machine_key() {
+            let root = scratch("vault-key");
+            let policy = over(&root, Vec::new());
+            let key = policy.state.join("vault/machine.key");
+            let frame = policy.state.join("sessions/s/events.ndjson");
+            fs::create_dir_all(key.parent().unwrap()).unwrap();
+            fs::create_dir_all(frame.parent().unwrap()).unwrap();
+            fs::write(&key, "seed").unwrap();
+            fs::write(&frame, "frame").unwrap();
+
+            let profile = policy.render_policy();
+            assert!(!read_probe(&profile, &key).status.success());
+            assert_eq!(read_probe(&profile, &frame).stdout, b"frame");
 
             fs::remove_dir_all(&root).unwrap();
         }

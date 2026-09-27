@@ -692,8 +692,10 @@ fn check_session_id(session_id: &str) -> Result<()> {
 }
 
 /// `$XDG_STATE_HOME/nd7`, default `~/.local/state/nd7`. Shared with
-/// [`crate::ship`], which keeps the vault's files in the same root.
-pub(crate) fn state_root() -> Result<PathBuf> {
+/// [`crate::ship`], which keeps the vault's files in the same root, and with
+/// `nd7 run`, which hands it to [`crate::policy::Policy`] so the profiles can
+/// deny writes to all of it.
+pub fn state_root() -> Result<PathBuf> {
     let state_home = env::var_os("XDG_STATE_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)

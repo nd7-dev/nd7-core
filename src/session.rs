@@ -143,6 +143,7 @@ mod tests {
         Policy {
             project: PathBuf::from("/Users/ada/proj"),
             home: PathBuf::from("/Users/ada"),
+            state: PathBuf::from("/Users/ada/.local/state/nd7"),
             tmp: PathBuf::from("/private/tmp"),
             exit: PathBuf::from("/usr/local/bin/nd7-exec"),
             grants: Vec::new(),
