@@ -311,7 +311,8 @@ cannot forge.
 - `nd7 run` applies one profile, the floor, to `claude` and its whole tree.
   The floor allows the project, the temp dir, `~/.claude`, Claude Code's
   scratch, HTTPS and DNS, and denies everything else, including writes under
-  `~/.nd7` by a per-operation rule placed last.
+  `~/.nd7` and the state root `~/.local/state/nd7` by a per-operation rule
+  placed last.
 - The floor has exactly one exit: `nd7-exec`, found next to the `nd7` binary.
   A `PreToolUse` hook installed by `nd7 run` via `--settings` rewrites every
   Bash command to `nd7-exec -c '<command>'`. `nd7-exec` finds its session by

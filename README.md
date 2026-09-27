@@ -185,7 +185,7 @@ What the session may do, from the start:
 | | allowed |
 |---|---|
 | write | the project directory, the temp dir, `~/.claude`, `~/.codex`, Claude Code's scratch under `/private/tmp/claude-*` |
-| read | everything except `~/.ssh`, `~/.aws` and `~/.nd7` |
+| read | everything except `~/.ssh`, `~/.aws` and the vault's keys under `~/.local/state/nd7/vault` |
 | network | HTTPS (port 443) and DNS. `git` over HTTPS works; over SSH it does not |
 | run | anything, inside the same boundary |
 
@@ -197,8 +197,9 @@ nd7 deny  ~/data      # taken back
 ```
 
 No restart. Grants are per session and vanish when it ends. Paths under
-`~/.nd7` can never be granted. If several sessions are running, add
-`--session <pid>`; the pid is printed when `nd7 run` starts.
+`~/.nd7` or `~/.local/state/nd7`, where nd7 keeps its own records, can never
+be granted. If several sessions are running, add `--session <pid>`; the pid
+is printed when `nd7 run` starts.
 
 How it holds. `nd7 run` applies the profile once, to the whole process tree,
 and the kernel lets a confined process apply no other profile, so nothing
