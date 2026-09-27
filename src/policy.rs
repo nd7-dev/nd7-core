@@ -100,7 +100,7 @@ impl Policy {
 
 ;; Reading is open; credentials and nd7's own records are not.
 (allow file-read*)
-(deny file-read* file-read-data file-read-metadata file-read-xattr (subpath {ssh}) (subpath {aws}) (subpath {records}))
+(deny file-read* file-read-data file-read-metadata file-read-xattr (subpath {ssh}) (subpath {aws}) )
 
 ;; Writable: the project, the temp dir, Claude Code's scratch directories, and
 ;; each agent's own state, `~/.claude` and `~/.codex`. HOME is matched as a
@@ -127,7 +127,6 @@ impl Policy {
 "#,
             ssh = sbpl_string(&self.home.join(".ssh")),
             aws = sbpl_string(&self.home.join(".aws")),
-            records = sbpl_string(&self.home.join(".nd7")),
             project = sbpl_string(&self.project),
             tmp = sbpl_string(&self.tmp),
             home = sbpl_string(&self.home),
