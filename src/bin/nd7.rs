@@ -21,14 +21,12 @@
 //!
 //! `sessions` and `show` arrive with milestone M5.
 
-use std::os::unix::net::UnixStream;
 use std::{
     env,
     io::{self, Read},
     process::ExitCode,
     time::Duration,
 };
-use std::{os::unix::net::UnixListener, thread};
 
 use nd7_core::{
     agent_config::{self, Agent, Changed},
@@ -220,26 +218,6 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
         )
     }
 
-    fn proxy_ssh_agent(sock: PathBuf, upstream: PathBuf) -> io::Result<()> {
-        let listener = UnixListener::bind(sock)?;
-        thread::spawn(move || {
-            for client in listener.incoming().flatten() {
-                let upstream = upstream.clone();
-                thread::spawn(move || {
-                    let Ok(agent) = UnixStream::connect(upstream) else {
-                        return;
-                    };
-                    let (mut cr, mut cw) = (client.try_clone().unwrap(), client);
-                    let (mut ar, mut aw) = (agent.try_clone().unwrap(), agent);
-                    let up = thread::spawn(move || io::copy(&mut cr, &mut aw));
-                    let _ = io::copy(&mut ar, &mut cw);
-                    let _ = up.join();
-                });
-            }
-        });
-        Ok(())
-    }
-
     /// The real thing: a session with this run's policy, and the floor
     /// rendered from it applied to the program and everything it spawns.
     fn spawn(program: &str, args: impl Iterator<Item = String>) -> Result<ExitStatus> {
@@ -268,8 +246,8 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
         trusted(&policy.exit)?;
         session.write_policy(&policy)?;
 
-        if let (Some(sock), Some(upstream)) = (policy.ssh_agent.clone(), upstream) {
-            proxy_ssh_agent(sock, upstream)?;
+        if let (Some(sock), Some(upstream)) = (policy.ssh_agent.as_deref(), upstream) {
+            nd7_core::ssh_proxy::serve(sock, upstream, &state.join("ssh-agent.log"))?;
         }
 
         // A sandboxed gpg cannot start an agent, so start it while we still can.

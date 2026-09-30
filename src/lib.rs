@@ -17,6 +17,10 @@
 //! - [`ship`]: `nd7 enroll` and `nd7 ship`, the machine's half of the vault
 //!   protocol: the session directory, the vault's own state, and the
 //!   network.
+//! - [`ssh_agent`]: the ssh-agent protocol, enough of it to say in one line
+//!   what each message the ssh-agent proxy carries is.
+//! - [`ssh_proxy`]: the ssh-agent socket `nd7 run` hands the program, which
+//!   forwards every message to the user's own agent and logs it.
 //! - [`vault`]: the wire format and cryptography the machine and the vault
 //!   server share. Pure; no I/O.
 
@@ -30,4 +34,6 @@ pub mod sbprofiles;
 pub mod session;
 pub mod session_log;
 pub mod ship;
+pub mod ssh_agent;
+pub mod ssh_proxy;
 pub mod vault;

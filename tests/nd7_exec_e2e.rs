@@ -9,7 +9,6 @@
 
 use std::{
     env, fs,
-    io::{BufRead, BufReader, Write},
     os::unix::net::UnixListener,
     path::{Path, PathBuf},
     process::{Command, Output},
@@ -356,36 +355,36 @@ fn short_root(name: &str) -> (PathBuf, PathBuf) {
     (root, proj)
 }
 
-/// A stand-in for the user's ssh-agent at `path`: it answers each connection
-/// with the first line it receives, then hangs up. Bytes that come back have
-/// gone through both directions of whatever sits in between.
-fn echo_agent(path: &Path) {
+/// A stand-in for the user's ssh-agent at `path`: it answers every request
+/// with an IDENTITIES_ANSWER holding no keys, until the client hangs up.
+fn empty_agent(path: &Path) {
     let listener = UnixListener::bind(path).unwrap();
     thread::spawn(move || {
-        for conn in listener.incoming().flatten() {
-            let mut line = String::new();
-            let mut reader = BufReader::new(conn);
-            if reader.read_line(&mut line).is_ok() {
-                let _ = reader.get_mut().write_all(line.as_bytes());
+        for mut conn in listener.incoming().flatten() {
+            while nd7_core::ssh_agent::read_frame(&mut conn).is_ok() {
+                if nd7_core::ssh_agent::write_frame(&mut conn, &[12, 0, 0, 0, 0]).is_err() {
+                    break;
+                }
             }
         }
     });
 }
 
 /// With an agent in the environment, `nd7 run` hands the program a socket of
-/// its own inside the session directory, carries bytes through it in both
-/// directions, and keeps the real agent's socket out of reach.
+/// its own inside the session directory, speaks the agent protocol over it
+/// well enough for a real client, and keeps the real agent's socket out of
+/// reach.
 #[test]
 fn nd7_run_proxies_the_ssh_agent_through_the_session() {
     let (root, proj) = short_root("ssh");
     let sessions = root.join("sessions");
     let upstream = root.join("agent.sock");
-    echo_agent(&upstream);
+    empty_agent(&upstream);
 
     // `-w 5`: if the proxy swallows the reply, fail instead of hanging.
     let script = format!(
         r#"echo "$SSH_AUTH_SOCK";
-           echo ping | /usr/bin/nc -w 5 -U "$SSH_AUTH_SOCK";
+           /usr/bin/ssh-add -l;
            /usr/bin/nc -w 5 -U {upstream} </dev/null 2>/dev/null; echo "direct=$?""#,
         upstream = upstream.display()
     );
@@ -408,10 +407,10 @@ fn nd7_run_proxies_the_ssh_agent_through_the_session() {
         stderr(&out)
     );
     assert_ne!(sock, upstream);
-    // Through it, the agent answers.
+    // Through it, a real client reaches the agent.
     assert_eq!(
         lines.next(),
-        Some("ping"),
+        Some("The agent has no identities."),
         "stdout: {stdout}\nstderr: {}",
         stderr(&out)
     );
