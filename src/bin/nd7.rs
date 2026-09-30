@@ -221,7 +221,9 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
     }
 
     fn proxy_ssh_agent(sock: PathBuf, upstream: PathBuf) -> io::Result<()> {
-        std::fs::remove_file(&sock)?; // Clean any sockets from a dangling session.
+        // We don't need to remove the socket file of a dangling process. Sweep takes care of that
+        // for us. We have a sweep process that runs after a process ends that sweeps the session
+        // directory.
         let listener = UnixListener::bind(sock)?;
         thread::spawn(move || {
             for client in listener.incoming().flatten() {
