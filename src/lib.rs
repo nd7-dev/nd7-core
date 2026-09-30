@@ -25,6 +25,7 @@
 //!   server share. Pure; no I/O.
 
 pub mod agent_config;
+pub mod config;
 pub mod hook;
 pub mod hook_prefix;
 pub mod policy;
