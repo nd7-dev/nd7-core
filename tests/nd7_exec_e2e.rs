@@ -9,8 +9,11 @@
 
 use std::{
     env, fs,
+    io::{BufRead, BufReader, Write},
+    os::unix::net::UnixListener,
     path::{Path, PathBuf},
     process::{Command, Output},
+    thread,
 };
 
 const EXEC: &str = env!("CARGO_BIN_EXE_nd7-exec");
@@ -337,4 +340,125 @@ fn nd7_run_creates_the_session_and_applies_the_rendered_floor() {
 
     fs::remove_dir_all(&root).unwrap();
     fs::remove_dir_all(&outside).unwrap();
+}
+
+/// A root under `/private/tmp`, not the temp dir: a Unix socket path may be at
+/// most 103 bytes on macOS, and the canonical temp dir alone uses half of
+/// them. Returns the root and the project directory inside it.
+fn short_root(name: &str) -> (PathBuf, PathBuf) {
+    let root = PathBuf::from(format!(
+        "/private/tmp/nd7-e2e-{name}-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    let proj = root.join("proj");
+    fs::create_dir_all(&proj).unwrap();
+    (root, proj)
+}
+
+/// A stand-in for the user's ssh-agent at `path`: it answers each connection
+/// with the first line it receives, then hangs up. Bytes that come back have
+/// gone through both directions of whatever sits in between.
+fn echo_agent(path: &Path) {
+    let listener = UnixListener::bind(path).unwrap();
+    thread::spawn(move || {
+        for conn in listener.incoming().flatten() {
+            let mut line = String::new();
+            let mut reader = BufReader::new(conn);
+            if reader.read_line(&mut line).is_ok() {
+                let _ = reader.get_mut().write_all(line.as_bytes());
+            }
+        }
+    });
+}
+
+/// With an agent in the environment, `nd7 run` hands the program a socket of
+/// its own inside the session directory, carries bytes through it in both
+/// directions, and keeps the real agent's socket out of reach.
+#[test]
+fn nd7_run_proxies_the_ssh_agent_through_the_session() {
+    let (root, proj) = short_root("ssh");
+    let sessions = root.join("sessions");
+    let upstream = root.join("agent.sock");
+    echo_agent(&upstream);
+
+    // `-w 5`: if the proxy swallows the reply, fail instead of hanging.
+    let script = format!(
+        r#"echo "$SSH_AUTH_SOCK";
+           echo ping | /usr/bin/nc -w 5 -U "$SSH_AUTH_SOCK";
+           /usr/bin/nc -w 5 -U {upstream} </dev/null 2>/dev/null; echo "direct=$?""#,
+        upstream = upstream.display()
+    );
+    let out = Command::new(ND7)
+        .args(["run", "/bin/zsh", "-c", &script])
+        .current_dir(&proj)
+        .env("ND7_SESSIONS_DIR", &sessions)
+        .env("SSH_AUTH_SOCK", &upstream)
+        .output()
+        .unwrap();
+    let stdout = stdout(&out);
+    let mut lines = stdout.lines();
+
+    // The program sees nd7's socket, in this run's session, not the agent's.
+    let sock = PathBuf::from(lines.next().unwrap_or("").trim());
+    assert!(
+        sock.starts_with(&sessions) && sock.ends_with("ssh.sock"),
+        "SSH_AUTH_SOCK inside the run was {}; stderr: {}",
+        sock.display(),
+        stderr(&out)
+    );
+    assert_ne!(sock, upstream);
+    // Through it, the agent answers.
+    assert_eq!(
+        lines.next(),
+        Some("ping"),
+        "stdout: {stdout}\nstderr: {}",
+        stderr(&out)
+    );
+    // Around it, the agent is unreachable: the floor names only the proxy.
+    assert_eq!(
+        lines.next(),
+        Some("direct=1"),
+        "stdout: {stdout}\nstderr: {}",
+        stderr(&out)
+    );
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+/// Without an agent there is nothing to proxy: the program inherits no
+/// `SSH_AUTH_SOCK`, and the session holds no socket.
+#[test]
+fn nd7_run_without_an_agent_offers_no_socket() {
+    let (root, proj) = short_root("no-ssh");
+    let sessions = root.join("sessions");
+
+    let script = format!(
+        r#"echo "${{SSH_AUTH_SOCK:-unset}}"; ls {}/*/"#,
+        sessions.display()
+    );
+    let out = Command::new(ND7)
+        .args(["run", "/bin/zsh", "-c", &script])
+        .current_dir(&proj)
+        .env("ND7_SESSIONS_DIR", &sessions)
+        .env_remove("SSH_AUTH_SOCK")
+        .output()
+        .unwrap();
+    let stdout = stdout(&out);
+    let mut lines = stdout.lines();
+
+    assert_eq!(
+        lines.next(),
+        Some("unset"),
+        "stdout: {stdout}\nstderr: {}",
+        stderr(&out)
+    );
+    let listed: Vec<&str> = lines.collect();
+    assert!(
+        listed.contains(&"policy.sb") && !listed.contains(&"ssh.sock"),
+        "session dir held {listed:?}; stderr: {}",
+        stderr(&out)
+    );
+
+    fs::remove_dir_all(&root).unwrap();
 }
