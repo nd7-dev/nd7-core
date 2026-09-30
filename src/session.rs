@@ -165,7 +165,7 @@ mod tests {
 
         let dir = {
             let session = Session::create(&root).unwrap();
-            write_policy_at(session.dir(), &policy).unwrap();
+            session.write_policy(&policy).unwrap();
             assert_eq!(
                 session.dir(),
                 root.join(std::process::id().to_string()).as_path()
@@ -190,7 +190,7 @@ mod tests {
         let root = scratch("rewrite");
         let mut policy = sample();
         let session = Session::create(&root).unwrap();
-        write_policy_at(session.dir(), &policy).unwrap();
+        session.write_policy(&policy).unwrap();
         let before = fs::read_to_string(session.dir().join("policy.sb")).unwrap();
         policy.grants.push(PathBuf::from("/Volumes/scratch"));
         session.write_policy(&policy).unwrap();
@@ -212,7 +212,7 @@ mod tests {
             ..sample()
         };
         let session = Session::create(&root).unwrap();
-        write_policy_at(session.dir(), &policy).unwrap();
+        session.write_policy(&policy).unwrap();
 
         assert_eq!(load(&root, std::process::id()).unwrap(), policy);
 

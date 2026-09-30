@@ -265,7 +265,7 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
             grants: Vec::new(),
             ssh_agent: upstream.is_some().then(|| session.dir().join("ssh.sock")),
         };
-        trusted(&policy.exit);
+        trusted(&policy.exit)?;
         session.write_policy(&policy)?;
 
         if let (Some(sock), Some(upstream)) = (policy.ssh_agent.clone(), upstream) {
