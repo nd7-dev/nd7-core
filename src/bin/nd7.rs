@@ -221,7 +221,7 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
     }
 
     fn proxy_ssh_agent(sock: PathBuf, upstream: PathBuf) -> io::Result<()> {
-        let _ = std::fs::remove_file(&sock)?; // Clean any sockets from a dangling session.
+        std::fs::remove_file(&sock)?; // Clean any sockets from a dangling session.
         let listener = UnixListener::bind(sock)?;
         thread::spawn(move || {
             for client in listener.incoming().flatten() {
@@ -274,7 +274,7 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
         session.write_policy(&policy)?;
 
         if let (Some(sock), Some(upstream)) = (policy.ssh_agent.clone(), upstream) {
-            let _ = proxy_ssh_agent(sock, upstream)?;
+            proxy_ssh_agent(sock, upstream)?;
         }
 
         // A sandboxed gpg cannot start an agent, so start it while we still can.
