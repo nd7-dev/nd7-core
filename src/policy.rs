@@ -111,7 +111,7 @@ impl Policy {
 ;; Reading is open; credentials and the vault's keys are not. The session log
 ;; beside the vault stays readable: it is the user's own record of the run.
 (allow file-read*)
-(deny file-read* file-read-data file-read-metadata file-read-xattr (subpath {ssh}) (subpath {aws}) (subpath {vault}) (subpath {known_hosts}))
+(deny file-read* file-read-data file-read-metadata file-read-xattr (subpath {ssh}) (subpath {aws}) (subpath {vault}))
 
 ;; Writable: the project, the temp dir, Claude Code's scratch directories, and
 ;; each agent's own state, `~/.claude` and `~/.codex`. HOME is matched as a
@@ -139,7 +139,6 @@ impl Policy {
             ssh = sbpl_string(&self.home.join(".ssh")),
             aws = sbpl_string(&self.home.join(".aws")),
             vault = sbpl_string(&self.state.join("vault")),
-            known_hosts = sbpl_string(&self.home.join(".ssh/known_hosts")),
             project = sbpl_string(&self.project),
             tmp = sbpl_string(&self.tmp),
             home = sbpl_string(&self.home),
@@ -150,10 +149,14 @@ impl Policy {
             res.push_str(&format!(
                 "
 ;; ssh reaches the user's agent through nd7's proxy socket in the session
-;; directory, never the main ssh agent.
-(allow network-outbound (literal {}))
+;; directory, never the agent's own; and it may read known_hosts, the one file
+;; under ~/.ssh it needs before it asks the agent for anything. Without an
+;; agent there is no proxy, and so no ssh at all.
+(allow network-outbound (literal {sock}))
+(allow file-read* file-read-data file-read-metadata file-read-xattr (literal {known_hosts}))
 ",
-                sbpl_string(sock)
+                sock = sbpl_string(sock),
+                known_hosts = sbpl_string(&self.home.join(".ssh/known_hosts")),
             ));
         }
 
@@ -234,7 +237,7 @@ mod tests {
 ;; Reading is open; credentials and the vault's keys are not. The session log
 ;; beside the vault stays readable: it is the user's own record of the run.
 (allow file-read*)
-(deny file-read* file-read-data file-read-metadata file-read-xattr (subpath "/Users/ada/.ssh") (subpath "/Users/ada/.aws") (subpath "/Users/ada/.local/state/nd7/vault") (subpath "/Users/ada/.ssh/known_hosts"))
+(deny file-read* file-read-data file-read-metadata file-read-xattr (subpath "/Users/ada/.ssh") (subpath "/Users/ada/.aws") (subpath "/Users/ada/.local/state/nd7/vault"))
 
 ;; Writable: the project, the temp dir, Claude Code's scratch directories, and
 ;; each agent's own state, `~/.claude` and `~/.codex`. HOME is matched as a
@@ -318,6 +321,27 @@ mod tests {
         );
 
         assert_eq!(policy.render_policy(), expected);
+    }
+
+    #[test]
+    fn an_agent_adds_its_socket_and_known_hosts_to_the_body() {
+        let policy = Policy {
+            ssh_agent: Some(PathBuf::from("/Users/ada/.nd7/sessions/1/ssh.sock")),
+            ..sample()
+        };
+        let expected = format!(
+            r#"{BODY}
+;; ssh reaches the user's agent through nd7's proxy socket in the session
+;; directory, never the agent's own; and it may read known_hosts, the one file
+;; under ~/.ssh it needs before it asks the agent for anything. Without an
+;; agent there is no proxy, and so no ssh at all.
+(allow network-outbound (literal "/Users/ada/.nd7/sessions/1/ssh.sock"))
+(allow file-read* file-read-data file-read-metadata file-read-xattr (literal "/Users/ada/.ssh/known_hosts"))
+{DENY_RECORDS}{DENY_AGENT_CONFIG}"#
+        );
+
+        assert_eq!(policy.render_policy(), expected);
+        assert!(!sample().render_policy().contains("known_hosts"));
     }
 
     #[test]
@@ -585,6 +609,34 @@ mod tests {
             let profile = policy.render_policy();
             assert!(!read_probe(&profile, &key).status.success());
             assert_eq!(read_probe(&profile, &frame).stdout, b"frame");
+
+            fs::remove_dir_all(&root).unwrap();
+        }
+
+        #[test]
+        fn known_hosts_opens_with_an_agent_and_nothing_else_under_ssh_does() {
+            let root = scratch("known-hosts");
+            let known_hosts = root.join(".ssh/known_hosts");
+            let key = root.join(".ssh/id_ed25519");
+            fs::create_dir_all(root.join(".ssh")).unwrap();
+            fs::write(&known_hosts, "github.com ssh-ed25519 AAAA\n").unwrap();
+            fs::write(&key, "secret").unwrap();
+
+            let without = over(&root, Vec::new());
+            let with = Policy {
+                ssh_agent: Some(root.join("ssh.sock")),
+                ..over(&root, Vec::new())
+            };
+            for profile in [with.render_floor(), with.render_policy()] {
+                assert_eq!(
+                    read_probe(&profile, &known_hosts).stdout,
+                    b"github.com ssh-ed25519 AAAA\n"
+                );
+                assert!(!read_probe(&profile, &key).status.success());
+            }
+            for profile in [without.render_floor(), without.render_policy()] {
+                assert!(!read_probe(&profile, &known_hosts).status.success());
+            }
 
             fs::remove_dir_all(&root).unwrap();
         }
