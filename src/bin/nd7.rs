@@ -221,9 +221,6 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
     }
 
     fn proxy_ssh_agent(sock: PathBuf, upstream: PathBuf) -> io::Result<()> {
-        // We don't need to remove the socket file of a dangling process. Sweep takes care of that
-        // for us. We have a sweep process that runs after a process ends that sweeps the session
-        // directory.
         let listener = UnixListener::bind(sock)?;
         thread::spawn(move || {
             for client in listener.incoming().flatten() {
@@ -266,10 +263,6 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
             exit: exit_path()?,
             home: home.clone(),
             grants: Vec::new(),
-
-            // We want to set a proxied ssh agent when there is an upstream agent. If there is not
-            // ssh agent present as upstream, this should be null since we don't need a proxied
-            // socket then.
             ssh_agent: upstream.is_some().then(|| session.dir().join("ssh.sock")),
         };
         trusted(&policy.exit)?;

@@ -22,7 +22,6 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 /// The rules of one `nd7 run`, as the profiles need them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +45,9 @@ pub struct Policy {
     /// only ever in the per-command profile.
     pub grants: Vec<PathBuf>,
 
+    /// We want to set a proxied ssh agent when there is an upstream agent. If there is not
+    /// ssh agent present as upstream, this should be None since we don't need a proxied
+    /// socket then.
     pub ssh_agent: Option<PathBuf>,
 }
 
@@ -91,12 +93,6 @@ impl Policy {
         out.push_str(&self.deny_records());
         out.push_str(&self.deny_agent_config());
         out
-    }
-
-    pub fn set_ssh_agent(&mut self, session_dir: &Path) -> Result<PathBuf> {
-        let p = session_dir.join("ssh.sock");
-        self.ssh_agent = Some(p.clone());
-        Ok(p)
     }
 
     /// Everything both profiles say, up to the rules that differ.
