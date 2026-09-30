@@ -22,6 +22,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 /// The rules of one `nd7 run`, as the profiles need them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,6 +45,8 @@ pub struct Policy {
     /// Extra write roots added by `nd7 allow`. Empty when the run starts, and
     /// only ever in the per-command profile.
     pub grants: Vec<PathBuf>,
+
+    pub ssh_agent: Option<PathBuf>,
 }
 
 /// Every concrete write operation, plus `file-link`, taken from Apple's own
@@ -90,9 +93,15 @@ impl Policy {
         out
     }
 
+    pub fn set_ssh_agent(&mut self, session_dir: &Path) -> Result<PathBuf> {
+        let p = session_dir.join("ssh.sock");
+        self.ssh_agent = Some(p.clone());
+        Ok(p)
+    }
+
     /// Everything both profiles say, up to the rules that differ.
     fn body(&self) -> String {
-        format!(
+        let mut res = format!(
             r#"(version 1)
 (deny default)
 (import "system.sb")
@@ -138,7 +147,20 @@ impl Policy {
             tmp = sbpl_string(&self.tmp),
             home = sbpl_string(&self.home),
             gpg_agent = sbpl_string(&self.home.join(".gnupg/S.gpg-agent.extra")),
-        )
+        );
+
+        if let Some(sock) = &self.ssh_agent {
+            res.push_str(&format!(
+                "
+;; ssh reaches the user's agent through nd7's proxy socket in the session
+;; directory, never the main ssh agent.
+(allow network-outbound (literal {}))
+",
+                sbpl_string(sock)
+            ));
+        }
+
+        res
     }
 
     /// The last rule of either profile; see [`WRITE_OPS`] for why it names
@@ -264,6 +286,7 @@ mod tests {
             tmp: PathBuf::from("/private/tmp"),
             exit: PathBuf::from("/usr/local/bin/nd7-exec"),
             grants: Vec::new(),
+            ssh_agent: None,
         }
     }
 
@@ -422,6 +445,7 @@ mod tests {
                 tmp: PathBuf::from("/private/tmp"),
                 exit: PathBuf::from("/usr/bin/true"),
                 grants,
+                ssh_agent: None,
             }
         }
 

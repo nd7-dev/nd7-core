@@ -21,12 +21,14 @@
 //!
 //! `sessions` and `show` arrive with milestone M5.
 
+use std::os::unix::net::UnixStream;
 use std::{
     env,
     io::{self, Read},
     process::ExitCode,
     time::Duration,
 };
+use std::{os::unix::net::UnixListener, thread};
 
 use nd7_core::{
     agent_config::{self, Agent, Changed},
@@ -218,6 +220,27 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
         )
     }
 
+    fn proxy_ssh_agent(sock: PathBuf, upstream: PathBuf) -> io::Result<()> {
+        let _ = std::fs::remove_file(&sock)?; // Clean any sockets from a dangling session.
+        let listener = UnixListener::bind(sock)?;
+        thread::spawn(move || {
+            for client in listener.incoming().flatten() {
+                let upstream = upstream.clone();
+                thread::spawn(move || {
+                    let Ok(agent) = UnixStream::connect(upstream) else {
+                        return;
+                    };
+                    let (mut cr, mut cw) = (client.try_clone().unwrap(), client);
+                    let (mut ar, mut aw) = (agent.try_clone().unwrap(), agent);
+                    let up = thread::spawn(move || io::copy(&mut cr, &mut aw));
+                    let _ = io::copy(&mut ar, &mut cw);
+                    let _ = up.join();
+                });
+            }
+        });
+        Ok(())
+    }
+
     /// The real thing: a session with this run's policy, and the floor
     /// rendered from it applied to the program and everything it spawns.
     fn spawn(program: &str, args: impl Iterator<Item = String>) -> Result<ExitStatus> {
@@ -226,21 +249,33 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
         use nd7_core::{policy::Policy, session::Session};
 
         let home = nd7_core::session::home()?;
-        // `nd7-exec` never resolves this again; it applies the profile as
-        // rendered here. Created first, because `subpath` matches resolved
-        // paths and a path that does not exist cannot be canonicalized.
+        let sessions_root = sessions_root(&home);
+
         let state = nd7_core::session_log::state_root()?;
         fs::create_dir_all(&state)?;
+
+        let session = Session::create(&sessions_root)?;
+        let upstream = env::var_os("SSH_AUTH_SOCK").map(PathBuf::from);
+
         let policy = Policy {
             project: env::current_dir()?.canonicalize()?,
             state: state.canonicalize()?,
             tmp: env::temp_dir().canonicalize()?,
             exit: exit_path()?,
-            home,
+            home: home.clone(),
             grants: Vec::new(),
+
+            // We want to set a proxied ssh agent when there is an upstream agent. If there is not
+            // ssh agent present as upstream, this should be null since we don't need a proxied
+            // socket then.
+            ssh_agent: upstream.is_some().then(|| session.dir().join("ssh.sock")),
         };
         trusted(&policy.exit)?;
-        let session = Session::create(&sessions_root(&policy.home), &policy)?;
+        session.write_policy(&policy)?;
+
+        if let (Some(sock), Some(upstream)) = (policy.ssh_agent.clone(), upstream) {
+            let _ = proxy_ssh_agent(sock, upstream)?;
+        }
 
         // A sandboxed gpg cannot start an agent, so start it while we still can.
         let _ = Command::new("gpgconf")
@@ -286,6 +321,9 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
         // The hook nd7 installs runs for every session the agent starts, so it
         // needs to know which of them are nd7's.
         cmd.env("ND7_SESSION", std::process::id().to_string());
+        if let Some(sock) = &policy.ssh_agent.as_ref() {
+            cmd.env("SSH_AUTH_SOCK", sock);
+        }
         if let Some(dir) = &gnupg {
             cmd.env("GNUPGHOME", dir);
         }

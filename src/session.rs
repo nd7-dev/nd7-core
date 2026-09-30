@@ -26,13 +26,11 @@ pub struct Session {
 impl Session {
     /// Sweeps the stale sessions under `root`, then creates this process's
     /// own and writes `policy` into it.
-    pub fn create(root: &Path, policy: &Policy) -> io::Result<Session> {
+    pub fn create(root: &Path) -> io::Result<Session> {
         fs::create_dir_all(root)?;
         Self::sweep(root)?;
-
         let dir = root.join(std::process::id().to_string());
         fs::create_dir_all(&dir)?;
-        write_policy_at(&dir, policy)?;
         Ok(Session { dir })
     }
 
@@ -147,6 +145,7 @@ mod tests {
             tmp: PathBuf::from("/private/tmp"),
             exit: PathBuf::from("/usr/local/bin/nd7-exec"),
             grants: Vec::new(),
+            ssh_agent: None,
         }
     }
 
@@ -165,7 +164,8 @@ mod tests {
         let policy = sample();
 
         let dir = {
-            let session = Session::create(&root, &policy).unwrap();
+            let session = Session::create(&root).unwrap();
+            write_policy_at(session.dir(), &policy).unwrap();
             assert_eq!(
                 session.dir(),
                 root.join(std::process::id().to_string()).as_path()
@@ -189,9 +189,9 @@ mod tests {
     fn writing_again_replaces_the_policy_and_leaves_nothing_behind() {
         let root = scratch("rewrite");
         let mut policy = sample();
-        let session = Session::create(&root, &policy).unwrap();
+        let session = Session::create(&root).unwrap();
+        write_policy_at(session.dir(), &policy).unwrap();
         let before = fs::read_to_string(session.dir().join("policy.sb")).unwrap();
-
         policy.grants.push(PathBuf::from("/Volumes/scratch"));
         session.write_policy(&policy).unwrap();
 
@@ -211,7 +211,8 @@ mod tests {
             grants: vec![PathBuf::from("/Volumes/scratch")],
             ..sample()
         };
-        let session = Session::create(&root, &policy).unwrap();
+        let session = Session::create(&root).unwrap();
+        write_policy_at(session.dir(), &policy).unwrap();
 
         assert_eq!(load(&root, std::process::id()).unwrap(), policy);
 
