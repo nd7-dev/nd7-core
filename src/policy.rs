@@ -111,7 +111,7 @@ impl Policy {
 ;; Reading is open; credentials and the vault's keys are not. The session log
 ;; beside the vault stays readable: it is the user's own record of the run.
 (allow file-read*)
-(deny file-read* file-read-data file-read-metadata file-read-xattr (subpath {ssh}) (subpath {aws}) (subpath {vault}))
+(deny file-read* file-read-data file-read-metadata file-read-xattr (subpath {ssh}) (subpath {aws}) (subpath {vault}) (subpath {known_hosts}))
 
 ;; Writable: the project, the temp dir, Claude Code's scratch directories, and
 ;; each agent's own state, `~/.claude` and `~/.codex`. HOME is matched as a
@@ -139,6 +139,7 @@ impl Policy {
             ssh = sbpl_string(&self.home.join(".ssh")),
             aws = sbpl_string(&self.home.join(".aws")),
             vault = sbpl_string(&self.state.join("vault")),
+            known_hosts = sbpl_string(&self.home.join(".ssh/known_hosts")),
             project = sbpl_string(&self.project),
             tmp = sbpl_string(&self.tmp),
             home = sbpl_string(&self.home),
@@ -233,7 +234,7 @@ mod tests {
 ;; Reading is open; credentials and the vault's keys are not. The session log
 ;; beside the vault stays readable: it is the user's own record of the run.
 (allow file-read*)
-(deny file-read* file-read-data file-read-metadata file-read-xattr (subpath "/Users/ada/.ssh") (subpath "/Users/ada/.aws") (subpath "/Users/ada/.local/state/nd7/vault"))
+(deny file-read* file-read-data file-read-metadata file-read-xattr (subpath "/Users/ada/.ssh") (subpath "/Users/ada/.aws") (subpath "/Users/ada/.local/state/nd7/vault") (subpath "/Users/ada/.ssh/known_hosts"))
 
 ;; Writable: the project, the temp dir, Claude Code's scratch directories, and
 ;; each agent's own state, `~/.claude` and `~/.codex`. HOME is matched as a
