@@ -114,10 +114,10 @@ impl Policy {
 (deny file-read* file-read-data file-read-metadata file-read-xattr (subpath {ssh}) (subpath {aws}) (subpath {vault}))
 
 ;; Writable: the project, the temp dir, Claude Code's scratch directories, and
-;; each agent's own state, `~/.claude` and `~/.codex`. HOME is matched as a
-;; subpath rather than spliced into the regex, because escaping a path into a
-;; regex is error-prone.
-(allow file-write* (subpath {project}) (subpath {tmp}) (regex #"^/private/tmp/claude-") (require-all (subpath {home}) (regex #"/\.claude(/|$)")) (require-all (subpath {home}) (regex #"/\.codex(/|$)")))
+;; each agent's own state: `~/.claude`, `~/.claude.json` and its backup and
+;; temp files, and `~/.codex`. HOME is matched as a subpath rather than spliced
+;; into the regex, because escaping a path into a regex is error-prone.
+(allow file-write* (subpath {project}) (subpath {tmp}) (regex #"^/private/tmp/claude-") (require-all (subpath {home}) (regex #"/\.claude(/|$)")) (require-all (subpath {home}) (regex #"/\.codex(/|$)")) (require-all (subpath {home}) (regex #"/\.claude\.json[^/]*$")))
 
 ;; DNS, network configuration and the keychain: what an HTTPS client needs.
 (allow mach-lookup (global-name "com.apple.dnssd.service") (global-name "com.apple.SystemConfiguration.configd") (global-name "com.apple.SecurityServer"))
@@ -240,10 +240,10 @@ mod tests {
 (deny file-read* file-read-data file-read-metadata file-read-xattr (subpath "/Users/ada/.ssh") (subpath "/Users/ada/.aws") (subpath "/Users/ada/.local/state/nd7/vault"))
 
 ;; Writable: the project, the temp dir, Claude Code's scratch directories, and
-;; each agent's own state, `~/.claude` and `~/.codex`. HOME is matched as a
-;; subpath rather than spliced into the regex, because escaping a path into a
-;; regex is error-prone.
-(allow file-write* (subpath "/Users/ada/proj") (subpath "/private/tmp") (regex #"^/private/tmp/claude-") (require-all (subpath "/Users/ada") (regex #"/\.claude(/|$)")) (require-all (subpath "/Users/ada") (regex #"/\.codex(/|$)")))
+;; each agent's own state: `~/.claude`, `~/.claude.json` and its backup and
+;; temp files, and `~/.codex`. HOME is matched as a subpath rather than spliced
+;; into the regex, because escaping a path into a regex is error-prone.
+(allow file-write* (subpath "/Users/ada/proj") (subpath "/private/tmp") (regex #"^/private/tmp/claude-") (require-all (subpath "/Users/ada") (regex #"/\.claude(/|$)")) (require-all (subpath "/Users/ada") (regex #"/\.codex(/|$)")) (require-all (subpath "/Users/ada") (regex #"/\.claude\.json[^/]*$")))
 
 ;; DNS, network configuration and the keychain: what an HTTPS client needs.
 (allow mach-lookup (global-name "com.apple.dnssd.service") (global-name "com.apple.SystemConfiguration.configd") (global-name "com.apple.SecurityServer"))
@@ -569,6 +569,7 @@ mod tests {
 
             for profile in [policy.render_policy(), policy.render_floor()] {
                 assert_allowed(&profile, &root.join(".codex/sessions/x"));
+                assert_allowed(&profile, &root.join(".claude.json"));
                 assert_denied(&profile, &root.join(".codex/config.toml"));
             }
 
