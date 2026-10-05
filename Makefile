@@ -10,7 +10,7 @@
 
 FEATURES := --features test-seams
 
-.PHONY: check fmt fmt-fix clippy clippy-fix test unit integration e2e outside-session
+.PHONY: check fmt fmt-fix clippy clippy-fix test unit integration e2e outside-session install
 
 ## Everything CI runs, in CI's order.
 check: fmt clippy test
@@ -53,3 +53,8 @@ integration: outside-session
 ## The two that run `nd7-exec` and `nd7 run` against a scratch `~/.nd7`.
 e2e: outside-session
 	cargo test $(FEATURES) --test nd7_exec --test nd7_exec_e2e
+
+## Build a release and put `nd7` and `nd7-exec` in ~/.cargo/bin, as the
+## README does. Cargo rebuilds first if the sources changed.
+install:
+	cargo install --locked --path .
