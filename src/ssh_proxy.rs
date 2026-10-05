@@ -77,12 +77,10 @@ mod tests {
     use super::*;
 
     /// Not the canonical temp dir: a socket path there is close to macOS's
-    /// limit of 103 bytes.
+    /// limit of 103 bytes. `/tmp` rather than `/private/tmp`, which only
+    /// macOS has.
     fn scratch(name: &str) -> PathBuf {
-        let root = PathBuf::from(format!(
-            "/private/tmp/nd7-ssh-{name}-{}",
-            std::process::id()
-        ));
+        let root = PathBuf::from(format!("/tmp/nd7-ssh-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         root
