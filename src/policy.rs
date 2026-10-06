@@ -49,11 +49,6 @@ pub struct Policy {
     /// ssh agent present as upstream, this should be None since we don't need a proxied
     /// socket then.
     pub ssh_agent: Option<PathBuf>,
-
-    /// The bundle id of the default handler for https URLs, when `nd7 run`
-    /// could find it. The floor lets Claude Code's own `open` hand a URL to
-    /// this one application and no other.
-    pub browser: Option<String>,
 }
 
 /// Every concrete write operation, plus `file-link`, taken from Apple's own
@@ -88,19 +83,6 @@ impl Policy {
 "#,
             home = sbpl_string(&self.home),
         ));
-        if let Some(browser) = &self.browser {
-            out.push_str(&format!(
-                "
-;; `open` hands the login URL to the browser through LaunchServices and an
-;; Apple Event. The event may go to the default browser and nowhere else: any
-;; other destination would let a sandboxed process script another app into
-;; running something for it.
-(allow mach-lookup (global-name \"com.apple.lsd.mapdb\") (global-name \"com.apple.coreservices.launchservicesd\") (global-name \"com.apple.coreservices.appleevents\"))
-(allow appleevent-send (appleevent-destination {browser}))
-",
-                browser = sbpl_string(Path::new(browser)),
-            ));
-        }
         out.push_str(&self.deny_records());
         out.push_str(&self.deny_agent_config());
         out
@@ -315,7 +297,6 @@ mod tests {
             exit: PathBuf::from("/usr/local/bin/nd7-exec"),
             grants: Vec::new(),
             ssh_agent: None,
-            browser: None,
         }
     }
 
@@ -338,28 +319,6 @@ mod tests {
         let expected = format!("{BODY}{FLOOR_RULES}{DENY_RECORDS}{DENY_AGENT_CONFIG}");
 
         assert_eq!(sample().render_floor(), expected);
-    }
-
-    #[test]
-    fn a_browser_adds_open_rules_to_the_floor_only() {
-        let policy = Policy {
-            browser: Some("com.apple.Safari".into()),
-            ..sample()
-        };
-        let expected = format!(
-            r#"{BODY}{FLOOR_RULES}
-;; `open` hands the login URL to the browser through LaunchServices and an
-;; Apple Event. The event may go to the default browser and nowhere else: any
-;; other destination would let a sandboxed process script another app into
-;; running something for it.
-(allow mach-lookup (global-name "com.apple.lsd.mapdb") (global-name "com.apple.coreservices.launchservicesd") (global-name "com.apple.coreservices.appleevents"))
-(allow appleevent-send (appleevent-destination "com.apple.Safari"))
-{DENY_RECORDS}{DENY_AGENT_CONFIG}"#
-        );
-
-        assert_eq!(policy.render_floor(), expected);
-        assert!(!policy.render_policy().contains("appleevent-send"));
-        assert!(!policy.render_policy().contains("launchservicesd"));
     }
 
     #[test]
@@ -526,7 +485,6 @@ mod tests {
                 exit: PathBuf::from("/usr/bin/true"),
                 grants,
                 ssh_agent: None,
-                browser: None,
             }
         }
 
@@ -602,13 +560,6 @@ mod tests {
             };
             compiles(&policy.render_floor());
             compiles(&policy.render_policy());
-
-            // The floor names a browser as an Apple Event destination.
-            let policy = Policy {
-                browser: Some("com.apple.Safari".into()),
-                ..policy
-            };
-            compiles(&policy.render_floor());
 
             fs::remove_dir_all(&root).unwrap();
         }

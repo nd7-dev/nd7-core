@@ -146,7 +146,6 @@ mod tests {
             exit: PathBuf::from("/usr/local/bin/nd7-exec"),
             grants: Vec::new(),
             ssh_agent: None,
-            browser: None,
         }
     }
 
