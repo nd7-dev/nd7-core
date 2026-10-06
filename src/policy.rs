@@ -49,6 +49,11 @@ pub struct Policy {
     /// ssh agent present as upstream, this should be None since we don't need a proxied
     /// socket then.
     pub ssh_agent: Option<PathBuf>,
+
+    /// The bundle id of the default handler for https URLs, when `nd7 run`
+    /// could find it. The floor lets Claude Code's own `open` hand a URL to
+    /// this one application and no other.
+    pub browser: Option<String>,
 }
 
 /// Every concrete write operation, plus `file-link`, taken from Apple's own
@@ -73,6 +78,29 @@ impl Policy {
 ",
             sbpl_string(&self.exit)
         ));
+        out.push_str(&format!(
+            r#"
+;; Signing in belongs to Claude Code's own process, not to the commands the
+;; model runs, so the floor allows this and the per-command profile does not.
+;; `security` saves the token by rewriting the login keychain through a temp
+;; file beside it, which it must be able to create.
+(allow file-write* (require-all (subpath {home}) (regex #"/Library/Keychains/login\.keychain-db(\.sb-[^/]*)?$")))
+"#,
+            home = sbpl_string(&self.home),
+        ));
+        if let Some(browser) = &self.browser {
+            out.push_str(&format!(
+                "
+;; `open` hands the login URL to the browser through LaunchServices and an
+;; Apple Event. The event may go to the default browser and nowhere else: any
+;; other destination would let a sandboxed process script another app into
+;; running something for it.
+(allow mach-lookup (global-name \"com.apple.lsd.mapdb\") (global-name \"com.apple.coreservices.launchservicesd\") (global-name \"com.apple.coreservices.appleevents\"))
+(allow appleevent-send (appleevent-destination {browser}))
+",
+                browser = sbpl_string(Path::new(browser)),
+            ));
+        }
         out.push_str(&self.deny_records());
         out.push_str(&self.deny_agent_config());
         out
@@ -287,20 +315,51 @@ mod tests {
             exit: PathBuf::from("/usr/local/bin/nd7-exec"),
             grants: Vec::new(),
             ssh_agent: None,
+            browser: None,
         }
     }
 
-    #[test]
-    fn floor_is_exactly_this() {
-        let expected = format!(
-            r#"{BODY}
+    /// The floor's own rules, between the body and the denies, for the policy
+    /// `sample` returns.
+    const FLOOR_RULES: &str = r#"
 ;; The floor's one exit: nd7-exec, which applies the session policy to itself
 ;; before it runs anything. Nothing else leaves this sandbox.
 (allow process-exec (with no-sandbox) (literal "/usr/local/bin/nd7-exec"))
+
+;; Signing in belongs to Claude Code's own process, not to the commands the
+;; model runs, so the floor allows this and the per-command profile does not.
+;; `security` saves the token by rewriting the login keychain through a temp
+;; file beside it, which it must be able to create.
+(allow file-write* (require-all (subpath "/Users/ada") (regex #"/Library/Keychains/login\.keychain-db(\.sb-[^/]*)?$")))
+"#;
+
+    #[test]
+    fn floor_is_exactly_this() {
+        let expected = format!("{BODY}{FLOOR_RULES}{DENY_RECORDS}{DENY_AGENT_CONFIG}");
+
+        assert_eq!(sample().render_floor(), expected);
+    }
+
+    #[test]
+    fn a_browser_adds_open_rules_to_the_floor_only() {
+        let policy = Policy {
+            browser: Some("com.apple.Safari".into()),
+            ..sample()
+        };
+        let expected = format!(
+            r#"{BODY}{FLOOR_RULES}
+;; `open` hands the login URL to the browser through LaunchServices and an
+;; Apple Event. The event may go to the default browser and nowhere else: any
+;; other destination would let a sandboxed process script another app into
+;; running something for it.
+(allow mach-lookup (global-name "com.apple.lsd.mapdb") (global-name "com.apple.coreservices.launchservicesd") (global-name "com.apple.coreservices.appleevents"))
+(allow appleevent-send (appleevent-destination "com.apple.Safari"))
 {DENY_RECORDS}{DENY_AGENT_CONFIG}"#
         );
 
-        assert_eq!(sample().render_floor(), expected);
+        assert_eq!(policy.render_floor(), expected);
+        assert!(!policy.render_policy().contains("appleevent-send"));
+        assert!(!policy.render_policy().contains("launchservicesd"));
     }
 
     #[test]
@@ -467,6 +526,7 @@ mod tests {
                 exit: PathBuf::from("/usr/bin/true"),
                 grants,
                 ssh_agent: None,
+                browser: None,
             }
         }
 
@@ -542,6 +602,37 @@ mod tests {
             };
             compiles(&policy.render_floor());
             compiles(&policy.render_policy());
+
+            // The floor names a browser as an Apple Event destination.
+            let policy = Policy {
+                browser: Some("com.apple.Safari".into()),
+                ..policy
+            };
+            compiles(&policy.render_floor());
+
+            fs::remove_dir_all(&root).unwrap();
+        }
+
+        #[test]
+        fn the_floor_writes_the_login_keychain_and_the_policy_does_not() {
+            let root = scratch("keychain");
+            fs::create_dir_all(root.join("Library/Keychains")).unwrap();
+            let policy = over(&root, Vec::new());
+            let keychain = root.join("Library/Keychains/login.keychain-db");
+            let temp = root.join("Library/Keychains/login.keychain-db.sb-x");
+            let other = root.join("Library/Keychains/other.keychain-db");
+
+            let floor = policy.render_floor();
+            assert_allowed(&floor, &temp);
+            assert_allowed(&floor, &keychain);
+            assert_denied(&floor, &other);
+
+            fs::remove_file(&temp).unwrap();
+            fs::remove_file(&keychain).unwrap();
+            let profile = policy.render_policy();
+            assert_denied(&profile, &temp);
+            assert_denied(&profile, &keychain);
+            assert_denied(&profile, &other);
 
             fs::remove_dir_all(&root).unwrap();
         }

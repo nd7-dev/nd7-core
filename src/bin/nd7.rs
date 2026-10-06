@@ -242,6 +242,7 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
             home: home.clone(),
             grants: Vec::new(),
             ssh_agent: upstream.is_some().then(|| session.dir().join("ssh.sock")),
+            browser: None,
         };
         trusted(&policy.exit)?;
         session.write_policy(&policy)?;
