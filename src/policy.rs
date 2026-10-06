@@ -49,6 +49,12 @@ pub struct Policy {
     /// ssh agent present as upstream, this should be None since we don't need a proxied
     /// socket then.
     pub ssh_agent: Option<PathBuf>,
+
+    /// The socket `nd7 run` serves for `open`: a shim first on the program's
+    /// PATH sends its arguments here, and `nd7 run` opens a URL from outside
+    /// the sandbox. Only the floor may reach it; the model's own commands
+    /// run under the per-command profile and cannot open anything.
+    pub open_sock: PathBuf,
 }
 
 /// Every concrete write operation, plus `file-link`, taken from Apple's own
@@ -82,6 +88,16 @@ impl Policy {
 (allow file-write* (require-all (subpath {home}) (regex #"/Library/Keychains/login\.keychain-db(\.sb-[^/]*)?$")))
 "#,
             home = sbpl_string(&self.home),
+        ));
+        out.push_str(&format!(
+            "
+;; Signing in also means handing a URL to the browser, which no sandboxed
+;; process can do, so a shim on the program's PATH asks nd7's broker instead.
+;; The floor alone reaches that socket; the commands the model runs cannot
+;; open anything.
+(allow network-outbound (literal {}))
+",
+            sbpl_string(&self.open_sock)
         ));
         out.push_str(&self.deny_records());
         out.push_str(&self.deny_agent_config());
@@ -297,6 +313,7 @@ mod tests {
             exit: PathBuf::from("/usr/local/bin/nd7-exec"),
             grants: Vec::new(),
             ssh_agent: None,
+            open_sock: PathBuf::from("/Users/ada/.nd7/sessions/1/open.sock"),
         }
     }
 
@@ -312,6 +329,12 @@ mod tests {
 ;; `security` saves the token by rewriting the login keychain through a temp
 ;; file beside it, which it must be able to create.
 (allow file-write* (require-all (subpath "/Users/ada") (regex #"/Library/Keychains/login\.keychain-db(\.sb-[^/]*)?$")))
+
+;; Signing in also means handing a URL to the browser, which no sandboxed
+;; process can do, so a shim on the program's PATH asks nd7's broker instead.
+;; The floor alone reaches that socket; the commands the model runs cannot
+;; open anything.
+(allow network-outbound (literal "/Users/ada/.nd7/sessions/1/open.sock"))
 "#;
 
     #[test]
@@ -485,6 +508,7 @@ mod tests {
                 exit: PathBuf::from("/usr/bin/true"),
                 grants,
                 ssh_agent: None,
+                open_sock: home.join("open.sock"),
             }
         }
 
@@ -540,6 +564,18 @@ mod tests {
                 assert!(connects(&profile, &extra));
                 assert!(!connects(&profile, &main));
             }
+
+            fs::remove_dir_all(&root).unwrap();
+        }
+
+        #[test]
+        fn the_floor_reaches_the_open_socket_and_a_command_does_not() {
+            let root = scratch("open");
+            let policy = over(&root, Vec::new());
+            listen(&policy.open_sock);
+
+            assert!(connects(&policy.render_floor(), &policy.open_sock));
+            assert!(!connects(&policy.render_policy(), &policy.open_sock));
 
             fs::remove_dir_all(&root).unwrap();
         }
