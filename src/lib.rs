@@ -27,6 +27,7 @@
 pub mod agent_config;
 pub mod hook;
 pub mod hook_prefix;
+pub mod open_proxy;
 pub mod policy;
 #[cfg(target_os = "macos")]
 pub mod sandbox;
