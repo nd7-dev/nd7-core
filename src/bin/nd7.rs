@@ -226,7 +226,7 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
     /// The real thing: a session with this run's policy, and the floor
     /// rendered from it applied to the program and everything it spawns.
     fn spawn(program: &str, args: impl Iterator<Item = String>) -> Result<ExitStatus> {
-        use std::{fs, process::Command};
+        use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Command};
 
         use nd7_core::{policy::Policy, session::Session};
 
@@ -256,6 +256,24 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
             nd7_core::ssh_proxy::serve(sock, upstream, &state.join("ssh-agent.log"))?;
         }
 
+        let nd7 = nd7_binary()?;
+        // Claude Code signs in by running the bare name `open`, which it finds
+        // on PATH. First on that PATH is this shim, so what it finds is a
+        // request to the broker below, which opens the URL outside the sandbox.
+        let bin = session.dir().join("bin");
+        fs::create_dir_all(&bin)?;
+        let shim = bin.join("open");
+        fs::write(
+            &shim,
+            format!("#!/bin/sh\nexec \"{}\" open \"$@\"\n", nd7.display()),
+        )?;
+        fs::set_permissions(&shim, fs::Permissions::from_mode(0o755))?;
+        nd7_core::open_proxy::serve(
+            &policy.open_sock,
+            &state.join("open.log"),
+            Path::new("/usr/bin/open"),
+        )?;
+
         // A sandboxed gpg cannot start an agent, so start it while we still can.
         let _ = Command::new("gpgconf")
             .args(["--launch", "gpg-agent"])
@@ -275,7 +293,6 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
             },
         };
 
-        let nd7 = nd7_binary()?;
         let agent = agent_of(program);
         eprintln!(
             "nd7 run: session {} under nd7's policy; a sandbox the program applies itself is refused{}",
@@ -303,6 +320,13 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
         if let Some(sock) = &policy.ssh_agent {
             cmd.env("SSH_AUTH_SOCK", sock);
         }
+        cmd.env(
+            "PATH",
+            env::join_paths(
+                std::iter::once(bin)
+                    .chain(env::split_paths(&env::var_os("PATH").unwrap_or_default())),
+            )?,
+        );
         if let Some(dir) = &gnupg {
             cmd.env("GNUPGHOME", dir);
         }
