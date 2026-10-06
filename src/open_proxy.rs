@@ -8,7 +8,11 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-fn handle_open_command(mut stream: UnixStream, log: Arc<Mutex<File>>) -> std::io::Result<()> {
+fn handle_open_command(
+    index: usize,
+    mut stream: UnixStream,
+    log: Arc<Mutex<File>>,
+) -> std::io::Result<()> {
     let mut reader = BufReader::new(&stream);
     let mut cmd = String::new();
     reader.read_line(&mut cmd)?;
@@ -18,7 +22,7 @@ fn handle_open_command(mut stream: UnixStream, log: Arc<Mutex<File>>) -> std::io
             .unwrap_or_default()
             .as_secs();
 
-        let _ = write!(log, "{at} {cmd}");
+        let _ = write!(log, "{at} client {index} {cmd}");
     }
     let _ = stream.write_all(b"OK");
     Ok(())
@@ -35,10 +39,10 @@ pub fn serve(sock: &Path, log: &Path) -> std::io::Result<()> {
     let listener = UnixListener::bind(sock)?;
 
     spawn(move || {
-        for (_, client) in listener.incoming().flatten().enumerate() {
+        for (i, client) in listener.incoming().flatten().enumerate() {
             let log = log.clone();
             spawn(move || {
-                let _ = handle_open_command(client, log);
+                let _ = handle_open_command(i, client, log);
             });
         }
     });
@@ -53,8 +57,7 @@ mod test {
     use crate::open_proxy::serve;
 
     fn scratch() -> PathBuf {
-        let tmp_dir = std::env::temp_dir();
-        let root = tmp_dir.join(format!("/nd7-open-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("nd7-open-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         root
@@ -83,6 +86,6 @@ mod test {
         // Here we trim the ts and compare only the commands because ts changes.
         // intersperse is not stable yet in rust. Using this library instead. Only in tests.
         let b: String = buf.split_once(" ").unwrap().1.to_string();
-        assert_eq!(b.trim(), cmd.trim())
+        assert_eq!(b.trim(), format!("client 0 {}", cmd.trim()));
     }
 }
