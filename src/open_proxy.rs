@@ -28,10 +28,13 @@ fn handle_open_command(
     Ok(())
 }
 
-/// The one shape of request the broker opens: a single `https` URL with a
-/// plain host. Everything else is refused by name, so the reply says what
-/// the caller got wrong without saying what would get through.
+/// The one shape of request the broker opens: a single URL with a plain
+/// host, `https` anywhere or `http` to this machine only, so a session can
+/// show the user a dev server it started. Everything else is refused by
+/// name, so the reply says what the caller got wrong.
 fn check(args: &[String]) -> Result<&str, &'static str> {
+    /// Hosts that name this machine, where a plain http dev server lives.
+    const LOOPBACK: [&str; 2] = ["localhost", "127.0.0.1"];
     let url = match args {
         [] => return Err("nothing to open"),
         [url] => url.as_str(),
@@ -43,8 +46,10 @@ fn check(args: &[String]) -> Result<&str, &'static str> {
     if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Err("URL contains whitespace or control characters");
     }
-    let Some(rest) = url.strip_prefix("https://") else {
-        return Err("only https URLs");
+    let (secure, rest) = match (url.strip_prefix("https://"), url.strip_prefix("http://")) {
+        (Some(rest), _) => (true, rest),
+        (None, Some(rest)) => (false, rest),
+        (None, None) => return Err("only http(s) URLs"),
     };
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
     let (host, port) = match authority.rsplit_once(':') {
@@ -53,6 +58,9 @@ fn check(args: &[String]) -> Result<&str, &'static str> {
     };
     if host.is_empty() {
         return Err("URL has no host");
+    }
+    if !secure && !LOOPBACK.contains(&host) {
+        return Err("http only to localhost");
     }
     if !host
         .chars()
@@ -104,13 +112,15 @@ mod test {
     }
 
     #[test]
-    fn check_accepts_one_plain_https_url_and_nothing_else() {
+    fn check_accepts_one_url_https_anywhere_or_http_to_this_machine() {
         let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let ok = [
             "https://claude.ai/oauth/authorize?code=true&state=x",
             "https://console.anthropic.com:443/login#top",
             "https://localhost:8080/",
             "https://example.com",
+            "http://localhost:3000/",
+            "http://127.0.0.1:8000/docs",
         ];
         for url in ok {
             assert_eq!(check(&args(&[url])), Ok(url), "{url}");
@@ -122,14 +132,17 @@ mod test {
                 "one URL at a time",
             ),
             (vec!["-a", "Calculator"], "one URL at a time"),
-            (vec!["-a"], "only https URLs"),
-            (vec!["http://example.com"], "only https URLs"),
-            (vec!["file:///etc/passwd"], "only https URLs"),
+            (vec!["-a"], "only http(s) URLs"),
+            (vec!["http://example.com"], "http only to localhost"),
+            (vec!["http://localhost.evil.com/"], "http only to localhost"),
+            (vec!["http://127.0.0.1.evil.com/"], "http only to localhost"),
+            (vec!["http://0.0.0.0:5173/"], "http only to localhost"),
+            (vec!["file:///etc/passwd"], "only http(s) URLs"),
             (
                 vec!["x-apple.systempreferences:com.apple.preference"],
-                "only https URLs",
+                "only http(s) URLs",
             ),
-            (vec!["/Applications/Calculator.app"], "only https URLs"),
+            (vec!["/Applications/Calculator.app"], "only http(s) URLs"),
             (vec!["https://"], "URL has no host"),
             (vec!["https:///path"], "URL has no host"),
             (
