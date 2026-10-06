@@ -1,4 +1,4 @@
-use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::ffi::{CStr, CString, c_char, c_int};
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
@@ -11,50 +11,6 @@ unsafe extern "C" {
         errorbuf: *mut *mut c_char,
     ) -> c_int;
     unsafe fn sandbox_free_error(errorbuf: *mut c_char);
-}
-
-#[link(name = "CoreServices", kind = "framework")]
-unsafe extern "C" {
-    fn LSCopyDefaultHandlerForURLScheme(scheme: *const c_void) -> *const c_void;
-}
-
-#[link(name = "CoreFoundation", kind = "framework")]
-unsafe extern "C" {
-    fn CFStringCreateWithCString(alloc: *const c_void, s: *const c_char, enc: u32)
-    -> *const c_void;
-    fn CFStringGetCString(s: *const c_void, buf: *mut c_char, len: isize, enc: u32) -> bool;
-    fn CFRelease(cf: *const c_void);
-}
-const UTF8: u32 = 0x0800_0100; // kCFStringEncodingUTF8
-
-/// The bundle id of the default handler for https URLs, when LaunchServices
-/// knows one and it looks like a bundle id. The floor names it as the one
-/// Apple Event destination, so nothing unexpected may go into the profile.
-pub fn default_browser() -> Option<String> {
-    let scheme = CString::new("https").unwrap();
-    let mut buf = [0 as c_char; 256];
-
-    let id = unsafe {
-        let cf = CFStringCreateWithCString(std::ptr::null(), scheme.as_ptr(), UTF8);
-        let handler = LSCopyDefaultHandlerForURLScheme(cf);
-        CFRelease(cf);
-        if handler.is_null() {
-            return None;
-        }
-
-        let ok = CFStringGetCString(handler, buf.as_mut_ptr(), buf.len() as isize, UTF8);
-        CFRelease(handler);
-        if !ok {
-            return None;
-        }
-        CStr::from_ptr(buf.as_ptr()).to_str().ok()?.to_owned()
-    };
-
-    let well_formed = !id.is_empty()
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
-    well_formed.then_some(id)
 }
 
 /// Applies profile to the calling process. Irreversible.
