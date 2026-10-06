@@ -146,6 +146,7 @@ mod tests {
             exit: PathBuf::from("/usr/local/bin/nd7-exec"),
             grants: Vec::new(),
             ssh_agent: None,
+            open_sock: PathBuf::from("/Users/ada/.nd7/sessions/1/open.sock"),
         }
     }
 

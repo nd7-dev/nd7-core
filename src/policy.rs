@@ -49,6 +49,12 @@ pub struct Policy {
     /// ssh agent present as upstream, this should be None since we don't need a proxied
     /// socket then.
     pub ssh_agent: Option<PathBuf>,
+
+    /// The socket `nd7 run` serves for `open`: a shim first on the program's
+    /// PATH sends its arguments here, and `nd7 run` opens a URL from outside
+    /// the sandbox. Only the floor may reach it; the model's own commands
+    /// run under the per-command profile and cannot open anything.
+    pub open_sock: PathBuf,
 }
 
 /// Every concrete write operation, plus `file-link`, taken from Apple's own
@@ -72,6 +78,26 @@ impl Policy {
 (allow process-exec (with no-sandbox) (literal {}))
 ",
             sbpl_string(&self.exit)
+        ));
+        out.push_str(&format!(
+            r#"
+;; Signing in belongs to Claude Code's own process, not to the commands the
+;; model runs, so the floor allows this and the per-command profile does not.
+;; `security` saves the token by rewriting the login keychain through a temp
+;; file beside it, which it must be able to create.
+(allow file-write* (require-all (subpath {home}) (regex #"/Library/Keychains/login\.keychain-db(\.sb-[^/]*)?$")))
+"#,
+            home = sbpl_string(&self.home),
+        ));
+        out.push_str(&format!(
+            "
+;; Signing in also means handing a URL to the browser, which no sandboxed
+;; process can do, so a shim on the program's PATH asks nd7's broker instead.
+;; The floor alone reaches that socket; the commands the model runs cannot
+;; open anything.
+(allow network-outbound (literal {}))
+",
+            sbpl_string(&self.open_sock)
         ));
         out.push_str(&self.deny_records());
         out.push_str(&self.deny_agent_config());
@@ -114,10 +140,10 @@ impl Policy {
 (deny file-read* file-read-data file-read-metadata file-read-xattr (subpath {ssh}) (subpath {aws}) (subpath {vault}))
 
 ;; Writable: the project, the temp dir, Claude Code's scratch directories, and
-;; each agent's own state, `~/.claude` and `~/.codex`. HOME is matched as a
-;; subpath rather than spliced into the regex, because escaping a path into a
-;; regex is error-prone.
-(allow file-write* (subpath {project}) (subpath {tmp}) (regex #"^/private/tmp/claude-") (require-all (subpath {home}) (regex #"/\.claude(/|$)")) (require-all (subpath {home}) (regex #"/\.codex(/|$)")))
+;; each agent's own state: `~/.claude`, `~/.claude.json` and its backup and
+;; temp files, and `~/.codex`. HOME is matched as a subpath rather than spliced
+;; into the regex, because escaping a path into a regex is error-prone.
+(allow file-write* (subpath {project}) (subpath {tmp}) (regex #"^/private/tmp/claude-") (require-all (subpath {home}) (regex #"/\.claude(/|$)")) (require-all (subpath {home}) (regex #"/\.codex(/|$)")) (require-all (subpath {home}) (regex #"/\.claude\.json[^/]*$")))
 
 ;; DNS, network configuration and the keychain: what an HTTPS client needs.
 (allow mach-lookup (global-name "com.apple.dnssd.service") (global-name "com.apple.SystemConfiguration.configd") (global-name "com.apple.SecurityServer"))
@@ -240,10 +266,10 @@ mod tests {
 (deny file-read* file-read-data file-read-metadata file-read-xattr (subpath "/Users/ada/.ssh") (subpath "/Users/ada/.aws") (subpath "/Users/ada/.local/state/nd7/vault"))
 
 ;; Writable: the project, the temp dir, Claude Code's scratch directories, and
-;; each agent's own state, `~/.claude` and `~/.codex`. HOME is matched as a
-;; subpath rather than spliced into the regex, because escaping a path into a
-;; regex is error-prone.
-(allow file-write* (subpath "/Users/ada/proj") (subpath "/private/tmp") (regex #"^/private/tmp/claude-") (require-all (subpath "/Users/ada") (regex #"/\.claude(/|$)")) (require-all (subpath "/Users/ada") (regex #"/\.codex(/|$)")))
+;; each agent's own state: `~/.claude`, `~/.claude.json` and its backup and
+;; temp files, and `~/.codex`. HOME is matched as a subpath rather than spliced
+;; into the regex, because escaping a path into a regex is error-prone.
+(allow file-write* (subpath "/Users/ada/proj") (subpath "/private/tmp") (regex #"^/private/tmp/claude-") (require-all (subpath "/Users/ada") (regex #"/\.claude(/|$)")) (require-all (subpath "/Users/ada") (regex #"/\.codex(/|$)")) (require-all (subpath "/Users/ada") (regex #"/\.claude\.json[^/]*$")))
 
 ;; DNS, network configuration and the keychain: what an HTTPS client needs.
 (allow mach-lookup (global-name "com.apple.dnssd.service") (global-name "com.apple.SystemConfiguration.configd") (global-name "com.apple.SecurityServer"))
@@ -287,18 +313,33 @@ mod tests {
             exit: PathBuf::from("/usr/local/bin/nd7-exec"),
             grants: Vec::new(),
             ssh_agent: None,
+            open_sock: PathBuf::from("/Users/ada/.nd7/sessions/1/open.sock"),
         }
     }
 
-    #[test]
-    fn floor_is_exactly_this() {
-        let expected = format!(
-            r#"{BODY}
+    /// The floor's own rules, between the body and the denies, for the policy
+    /// `sample` returns.
+    const FLOOR_RULES: &str = r#"
 ;; The floor's one exit: nd7-exec, which applies the session policy to itself
 ;; before it runs anything. Nothing else leaves this sandbox.
 (allow process-exec (with no-sandbox) (literal "/usr/local/bin/nd7-exec"))
-{DENY_RECORDS}{DENY_AGENT_CONFIG}"#
-        );
+
+;; Signing in belongs to Claude Code's own process, not to the commands the
+;; model runs, so the floor allows this and the per-command profile does not.
+;; `security` saves the token by rewriting the login keychain through a temp
+;; file beside it, which it must be able to create.
+(allow file-write* (require-all (subpath "/Users/ada") (regex #"/Library/Keychains/login\.keychain-db(\.sb-[^/]*)?$")))
+
+;; Signing in also means handing a URL to the browser, which no sandboxed
+;; process can do, so a shim on the program's PATH asks nd7's broker instead.
+;; The floor alone reaches that socket; the commands the model runs cannot
+;; open anything.
+(allow network-outbound (literal "/Users/ada/.nd7/sessions/1/open.sock"))
+"#;
+
+    #[test]
+    fn floor_is_exactly_this() {
+        let expected = format!("{BODY}{FLOOR_RULES}{DENY_RECORDS}{DENY_AGENT_CONFIG}");
 
         assert_eq!(sample().render_floor(), expected);
     }
@@ -467,6 +508,7 @@ mod tests {
                 exit: PathBuf::from("/usr/bin/true"),
                 grants,
                 ssh_agent: None,
+                open_sock: home.join("open.sock"),
             }
         }
 
@@ -527,6 +569,18 @@ mod tests {
         }
 
         #[test]
+        fn the_floor_reaches_the_open_socket_and_a_command_does_not() {
+            let root = scratch("open");
+            let policy = over(&root, Vec::new());
+            listen(&policy.open_sock);
+
+            assert!(connects(&policy.render_floor(), &policy.open_sock));
+            assert!(!connects(&policy.render_policy(), &policy.open_sock));
+
+            fs::remove_dir_all(&root).unwrap();
+        }
+
+        #[test]
         fn both_renderings_compile() {
             let root = scratch("compiles");
             let policy = over(&root, Vec::new());
@@ -542,6 +596,30 @@ mod tests {
             };
             compiles(&policy.render_floor());
             compiles(&policy.render_policy());
+
+            fs::remove_dir_all(&root).unwrap();
+        }
+
+        #[test]
+        fn the_floor_writes_the_login_keychain_and_the_policy_does_not() {
+            let root = scratch("keychain");
+            fs::create_dir_all(root.join("Library/Keychains")).unwrap();
+            let policy = over(&root, Vec::new());
+            let keychain = root.join("Library/Keychains/login.keychain-db");
+            let temp = root.join("Library/Keychains/login.keychain-db.sb-x");
+            let other = root.join("Library/Keychains/other.keychain-db");
+
+            let floor = policy.render_floor();
+            assert_allowed(&floor, &temp);
+            assert_allowed(&floor, &keychain);
+            assert_denied(&floor, &other);
+
+            fs::remove_file(&temp).unwrap();
+            fs::remove_file(&keychain).unwrap();
+            let profile = policy.render_policy();
+            assert_denied(&profile, &temp);
+            assert_denied(&profile, &keychain);
+            assert_denied(&profile, &other);
 
             fs::remove_dir_all(&root).unwrap();
         }
@@ -569,6 +647,7 @@ mod tests {
 
             for profile in [policy.render_policy(), policy.render_floor()] {
                 assert_allowed(&profile, &root.join(".codex/sessions/x"));
+                assert_allowed(&profile, &root.join(".claude.json"));
                 assert_denied(&profile, &root.join(".codex/config.toml"));
             }
 
