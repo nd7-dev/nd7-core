@@ -1,31 +1,76 @@
+//! The `open` socket `nd7 run` serves in the session directory. A shim named
+//! `open`, first on the program's PATH, sends its arguments here one per line;
+//! the broker opens a single URL with the real `/usr/bin/open`, from outside
+//! the sandbox, and refuses everything else. Every request lands on one line
+//! of `<state root>/open.log`: time, pid, connection, verdict, arguments.
+//!
+//! Why a broker and not a profile rule: the app that receives an Apple Event
+//! refuses it from any sandboxed sender, whatever Seatbelt allows, so the
+//! event has to come from the one process without a profile.
+
 use std::{
-    fs::File,
-    io::{BufRead, BufReader, Write},
+    fs::{File, OpenOptions},
+    io::{self, BufRead, BufReader, Write},
     os::unix::net::{UnixListener, UnixStream},
-    path::Path,
+    path::{Path, PathBuf},
+    process::Command,
     sync::{Arc, Mutex},
-    thread::spawn,
+    thread,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-fn handle_open_command(
-    index: usize,
-    mut stream: UnixStream,
-    log: Arc<Mutex<File>>,
-) -> std::io::Result<()> {
-    let mut reader = BufReader::new(&stream);
-    let mut cmd = String::new();
-    reader.read_line(&mut cmd)?;
-    if let Ok(mut log) = log.lock() {
-        let at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        let _ = write!(log, "{at} client {index} {cmd}");
-    }
-    let _ = stream.write_all(b"OK");
+/// Serves `sock`: each connection is one request, answered with `ok`,
+/// `refused: <why>` or `error: <what>`, and noted on one line of `log`.
+/// `opener` is the program a URL is handed to, `/usr/bin/open` outside
+/// tests. Returns once the socket is bound and the log is open.
+pub fn serve(sock: &Path, log: &Path, opener: &Path) -> io::Result<()> {
+    let log = Arc::new(Mutex::new(
+        OpenOptions::new().append(true).create(true).open(log)?,
+    ));
+    let listener = UnixListener::bind(sock)?;
+    let opener: PathBuf = opener.to_path_buf();
+    thread::spawn(move || {
+        for (index, client) in listener.incoming().flatten().enumerate() {
+            let (log, opener) = (Arc::clone(&log), opener.clone());
+            thread::spawn(move || handle(index, client, &opener, &log));
+        }
+    });
     Ok(())
+}
+
+fn handle(index: usize, mut stream: UnixStream, opener: &Path, log: &Mutex<File>) {
+    let args: Vec<String> = BufReader::new(&stream)
+        .lines()
+        .map_while(Result::ok)
+        .collect();
+
+    let (verdict, reply) = match check(&args) {
+        Err(why) => ("refuse", format!("refused: {why}")),
+        Ok(url) => match Command::new(opener).arg(url).status() {
+            Ok(status) if status.success() => ("allow", "ok".to_string()),
+            Ok(status) => (
+                "error",
+                format!("error: {} exited with {status}", opener.display()),
+            ),
+            Err(e) => ("error", format!("error: {}: {e}", opener.display())),
+        },
+    };
+
+    let at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    // The caller must never wait on the log, so a write that fails is one
+    // line lost, not an error.
+    if let Ok(mut log) = log.lock() {
+        let _ = writeln!(
+            log,
+            "{at} {} {index} {verdict} {}",
+            std::process::id(),
+            args.join(" ")
+        );
+    }
+    let _ = writeln!(stream, "{reply}");
 }
 
 /// The one shape of request the broker opens: a single URL with a plain
@@ -76,39 +121,35 @@ fn check(args: &[String]) -> Result<&str, &'static str> {
     Ok(url)
 }
 
-pub fn serve(sock: &Path, log: &Path) -> std::io::Result<()> {
-    let log = Arc::new(Mutex::new(
-        std::fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(log)?,
-    ));
-
-    let listener = UnixListener::bind(sock)?;
-
-    spawn(move || {
-        for (i, client) in listener.incoming().flatten().enumerate() {
-            let log = log.clone();
-            spawn(move || {
-                let _ = handle_open_command(i, client, log);
-            });
-        }
-    });
-    Ok(())
-}
-
 #[cfg(test)]
-mod test {
-    use std::io::{Read, Write};
-    use std::{fs, os::unix::net::UnixStream, path::PathBuf};
+mod tests {
+    use std::{
+        fs,
+        io::{Read, Write},
+        net::Shutdown,
+        os::unix::net::UnixStream,
+        path::{Path, PathBuf},
+    };
 
-    use crate::open_proxy::{check, serve};
+    use super::{check, serve};
 
-    fn scratch() -> PathBuf {
-        let root = std::env::temp_dir().join(format!("nd7-open-{}", std::process::id()));
+    fn scratch(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("nd7-open-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    /// One request as the shim makes it: arguments as lines, then EOF.
+    fn ask(sock: &Path, args: &[&str]) -> String {
+        let mut client = UnixStream::connect(sock).unwrap();
+        for a in args {
+            writeln!(client, "{a}").unwrap();
+        }
+        client.shutdown(Shutdown::Write).unwrap();
+        let mut reply = String::new();
+        client.read_to_string(&mut reply).unwrap();
+        reply
     }
 
     #[test]
@@ -168,27 +209,46 @@ mod test {
     }
 
     #[test]
-    fn test_write_cmd_to_log() {
-        let root = scratch();
-        let (sock, log) = (root.join("open.sock"), root.join("process.log"));
-        serve(&sock, &log).unwrap();
+    fn a_url_is_opened_and_anything_else_is_refused_both_logged() {
+        let root = scratch("verdicts");
+        let (sock, log) = (root.join("open.sock"), root.join("open.log"));
+        serve(&sock, &log, Path::new("/usr/bin/true")).unwrap();
 
-        let cmd = String::from("open browser https://google.com\n");
-        let mut client = UnixStream::connect(&sock).unwrap();
-        // Write a command to the socket
-        client.write_all(cmd.as_bytes()).unwrap();
+        assert_eq!(ask(&sock, &["https://example.com/"]), "ok\n");
+        assert_eq!(
+            ask(&sock, &["-a", "Calculator"]),
+            "refused: one URL at a time\n"
+        );
 
-        let mut ack = String::new();
-        client.read_to_string(&mut ack).unwrap();
-        assert_eq!(ack, "OK");
+        // Time and pid vary; connection, verdict and arguments do not.
+        let lines: Vec<String> = fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|l| l.splitn(3, ' ').nth(2).unwrap().to_string())
+            .collect();
+        assert_eq!(
+            lines,
+            ["0 allow https://example.com/", "1 refuse -a Calculator"]
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
 
-        let mut f = fs::OpenOptions::new().read(true).open(&log).unwrap();
-        let mut buf = String::new();
-        let _ = f.read_to_string(&mut buf).unwrap();
-        // Log expected to have:
-        // <ts> open browser https://google.com\n
-        // Here we trim the ts and compare only the commands because ts changes.
-        let b: String = buf.split_once(" ").unwrap().1.to_string();
-        assert_eq!(b.trim(), format!("client 0 {}", cmd.trim()));
+    #[test]
+    fn an_opener_that_fails_is_reported_as_an_error_not_a_refusal() {
+        let root = scratch("opener-fails");
+        let (sock, log) = (root.join("open.sock"), root.join("open.log"));
+        serve(&sock, &log, Path::new("/usr/bin/false")).unwrap();
+
+        let reply = ask(&sock, &["https://example.com/"]);
+        assert!(
+            reply.starts_with("error: /usr/bin/false exited with"),
+            "{reply}"
+        );
+        assert!(
+            fs::read_to_string(&log)
+                .unwrap()
+                .contains(" 0 error https://example.com/")
+        );
+        fs::remove_dir_all(&root).unwrap();
     }
 }
