@@ -14,6 +14,8 @@
 //!   `nd7 run` no longer has to pass the hooks per invocation.
 //! - `nd7 hook-prefix`: the PreToolUse hook `nd7 run` installs; rewrites a
 //!   Bash command to run through `nd7-exec`. Silent outside a session.
+//! - `nd7 open <url>`: what the `open` shim on a session's PATH calls; hands
+//!   the URL to that session's `nd7 run`, which opens it outside the sandbox.
 //! - `nd7 allow <path>` / `nd7 deny <path>`: widen or narrow the running
 //!   session's policy; the next Bash command sees it, no restart.
 //!
@@ -57,6 +59,8 @@ commands:
                              this directory; --no-alias leaves the shell alone
   hook-prefix                the PreToolUse hook nd7 run installs: reads the payload on
                              stdin, replies with the Bash command routed through nd7-exec
+  open <url>                 what the open shim on a session's PATH calls: hands the URL to
+                             that session's nd7 run, which opens it outside the sandbox
   allow <path>               let the running session write under <path>, from the next
                              command on; --session <pid> picks one when several run
   deny <path>                take that grant back";
@@ -142,6 +146,7 @@ fn main() -> ExitCode {
         Some("run") => run(args),
         Some("init") => init(args),
         Some("hook-prefix") => hook_prefix(),
+        Some("open") => open(args),
         Some(verb @ ("allow" | "deny")) => match grant(verb, args) {
             Ok(msg) => {
                 println!("{msg}");
@@ -332,16 +337,6 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
         }
         drop(session);
         Ok(status)
-    }
-
-    /// Where sessions are recorded. Must agree with `nd7-exec`, which derives
-    /// it from passwd; the override exists for the tests only.
-    fn sessions_root(home: &std::path::Path) -> PathBuf {
-        #[cfg(feature = "test-seams")]
-        if let Some(p) = env::var_os("ND7_SESSIONS_DIR") {
-            return PathBuf::from(p);
-        }
-        home.join(".nd7/sessions")
     }
 
     /// The exit binary is the one thing allowed out of the sandbox, so it
@@ -542,6 +537,43 @@ fn hook_prefix() -> ExitCode {
         Err(e) => eprintln!("nd7 hook-prefix: {e}"),
     }
     ExitCode::SUCCESS
+}
+
+/// `nd7 open <url>`: what the `open` shim on a session's PATH runs. It sends
+/// its arguments to the socket that session's `nd7 run` serves, one per line,
+/// and reports the broker's verdict: silence when the URL was opened, the
+/// reason on stderr when it was not.
+fn open(args: impl Iterator<Item = String>) -> ExitCode {
+    use std::{io::Write, net::Shutdown, os::unix::net::UnixStream};
+
+    let Some(session) = env::var_os("ND7_SESSION") else {
+        eprintln!("nd7 open: not inside an nd7 session");
+        return ExitCode::from(1);
+    };
+    let asked = || -> Result<String> {
+        let sock = sessions_root(&nd7_core::session::home()?)
+            .join(session)
+            .join("open.sock");
+        let mut broker = UnixStream::connect(sock)?;
+        for arg in args {
+            writeln!(broker, "{arg}")?;
+        }
+        broker.shutdown(Shutdown::Write)?;
+        let mut reply = String::new();
+        broker.read_to_string(&mut reply)?;
+        Ok(reply)
+    }();
+    match asked {
+        Ok(reply) if reply.starts_with("ok") => ExitCode::SUCCESS,
+        Ok(reply) => {
+            eprintln!("nd7 open: {}", reply.trim());
+            ExitCode::from(1)
+        }
+        Err(e) => {
+            eprintln!("nd7 open: {e}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 /// `nd7 init [claude|codex] [--global|--project] [--no-alias]`: write nd7's
@@ -746,6 +778,16 @@ fn grant(verb: &str, mut args: impl Iterator<Item = String>) -> Result<String> {
         ),
         _ => format!("session {pid}: {} was not a grant", path.display()),
     })
+}
+
+/// Where sessions are recorded. Must agree with `nd7-exec`, which derives
+/// it from passwd; the override exists for the tests only.
+fn sessions_root(home: &std::path::Path) -> std::path::PathBuf {
+    #[cfg(feature = "test-seams")]
+    if let Some(p) = env::var_os("ND7_SESSIONS_DIR") {
+        return std::path::PathBuf::from(p);
+    }
+    home.join(".nd7/sessions")
 }
 
 /// This binary, resolved: the hook command and the exit path are derived
