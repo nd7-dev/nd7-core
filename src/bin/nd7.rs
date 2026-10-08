@@ -1,23 +1,5 @@
-//! `nd7`: the flight recorder's command line.
-//!
-//! - `nd7 record`: read one Claude Code hook payload from stdin and append it
-//!   to the session log as one sealed event. This is what the hooks call.
-//! - `nd7 verify <session-id>`: walk that session's chain and report.
-//! - `nd7 enroll <server> <token>`: bind this machine to a vault.
-//! - `nd7 ship`: push unshipped frames to that vault.
-//! - `nd7 run [--profile <file>] <program> [args...]`: run a program under
-//!   nd7's sandbox: a session, the floor profile, and for `claude` and
-//!   `codex` the hook that routes every Bash command through `nd7-exec`.
-//!   macOS only.
-//! - `nd7 init [claude|codex]`: write nd7's hooks into the agent's own
-//!   configuration, and the shell aliases that start it under `nd7 run`, so
-//!   `nd7 run` no longer has to pass the hooks per invocation.
-//! - `nd7 hook-prefix`: the PreToolUse hook `nd7 run` installs; rewrites a
-//!   Bash command to run through `nd7-exec`. Silent outside a session.
-//! - `nd7 open <url>`: what the `open` shim on a session's PATH calls; hands
-//!   the URL to that session's `nd7 run`, which opens it outside the sandbox.
-//! - `nd7 allow <path>` / `nd7 deny <path>`: widen or narrow the running
-//!   session's policy; the next Bash command sees it, no restart.
+//! `nd7`: the flight recorder's command line. `USAGE` below lists its
+//! commands.
 //!
 //! Plain blocking I/O; nothing here needs a runtime.
 //!
@@ -26,9 +8,13 @@
 use std::{
     env,
     io::{self, Read},
+    path::{Path, PathBuf},
     process::ExitCode,
     time::Duration,
 };
+
+#[cfg(target_os = "macos")]
+use std::process::ExitStatus;
 
 use nd7_core::{
     agent_config::{self, Agent, Changed},
@@ -193,198 +179,7 @@ fn verify(session_id: &str) -> std::result::Result<Report, ChainError> {
 /// code becomes ours.
 #[cfg(target_os = "macos")]
 fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
-    use std::{os::unix::process::ExitStatusExt, path::PathBuf, process::ExitStatus};
-
-    /// Seatbelt takes its parameters as strings, so a path that is not UTF-8
-    /// cannot be one.
-    fn param(path: PathBuf) -> Result<String> {
-        path.into_os_string()
-            .into_string()
-            .map_err(|path| format!("path is not UTF-8: {path:?}").into())
-    }
-
-    /// `--profile <file>`: the raw profile, with PROJ, TMP and HOME as
-    /// parameters, and no session. For experiments.
-    fn spawn_raw(
-        path: &str,
-        program: &str,
-        args: impl Iterator<Item = String>,
-    ) -> Result<ExitStatus> {
-        let profile = std::fs::read_to_string(path)?;
-        // `subpath` matches resolved paths, so the parameters are canonical.
-        let proj = param(env::current_dir()?.canonicalize()?)?;
-        let tmp = param(env::temp_dir().canonicalize()?)?;
-        let home = param(nd7_core::session::home()?)?;
-        let params = [("PROJ", &*proj), ("TMP", &*tmp), ("HOME", &*home)];
-        Ok(
-            nd7_core::sandbox::spawn_with_profile(&profile, program, &params)
-                .args(args)
-                .status()?,
-        )
-    }
-
-    /// The real thing: a session with this run's policy, and the floor
-    /// rendered from it applied to the program and everything it spawns.
-    fn spawn(program: &str, args: impl Iterator<Item = String>) -> Result<ExitStatus> {
-        use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Command};
-
-        use nd7_core::{policy::Policy, session::Session};
-
-        let home = nd7_core::session::home()?;
-        let sessions_root = sessions_root(&home);
-
-        let state = nd7_core::session_log::state_root()?;
-        fs::create_dir_all(&state)?;
-
-        let session = Session::create(&sessions_root)?;
-        let upstream = env::var_os("SSH_AUTH_SOCK").map(PathBuf::from);
-
-        let policy = Policy {
-            project: env::current_dir()?.canonicalize()?,
-            state: state.canonicalize()?,
-            tmp: env::temp_dir().canonicalize()?,
-            exit: exit_path()?,
-            home: home.clone(),
-            grants: Vec::new(),
-            ssh_agent: upstream.is_some().then(|| session.dir().join("ssh.sock")),
-            open_sock: session.dir().join("open.sock"),
-        };
-        trusted(&policy.exit)?;
-        session.write_policy(&policy)?;
-
-        if let (Some(sock), Some(upstream)) = (policy.ssh_agent.as_deref(), upstream) {
-            nd7_core::ssh_proxy::serve(sock, upstream, &state.join("ssh-agent.log"))?;
-        }
-
-        let nd7 = nd7_binary()?;
-        // Claude Code signs in by running the bare name `open`, which it finds
-        // on PATH. First on that PATH is this shim, so what it finds is a
-        // request to the broker below, which opens the URL outside the sandbox.
-        let bin = session.dir().join("bin");
-        fs::create_dir_all(&bin)?;
-        let shim = bin.join("open");
-        fs::write(
-            &shim,
-            format!("#!/bin/sh\nexec \"{}\" open \"$@\"\n", nd7.display()),
-        )?;
-        fs::set_permissions(&shim, fs::Permissions::from_mode(0o755))?;
-        nd7_core::open_proxy::serve(
-            &policy.open_sock,
-            &state.join("open.log"),
-            Path::new("/usr/bin/open"),
-        )?;
-
-        // A sandboxed gpg cannot start an agent, so start it while we still can.
-        let _ = Command::new("gpgconf")
-            .args(["--launch", "gpg-agent"])
-            .status();
-        let gnupg = env::temp_dir().join(format!("nd7-gpg-{}", std::process::id()));
-        let gnupg = match env::var_os("GNUPGHOME") {
-            // The user's own choice. Leave it: gpg then looks for the agent
-            // in that directory, the profile denies it, and signing fails closed.
-            Some(_) => None,
-            None => match gpg_home(&policy.home, &gnupg) {
-                Ok(true) => Some(gnupg),
-                Ok(false) => None,
-                Err(e) => {
-                    eprintln!("nd7 run: gpg signing unavailable: {e}");
-                    None
-                }
-            },
-        };
-
-        let agent = agent_of(program);
-        eprintln!(
-            "nd7 run: session {} under nd7's policy; a sandbox the program applies itself is refused{}",
-            std::process::id(),
-            match agent {
-                Some(Agent::Codex)
-                    if installed(Agent::Codex, &policy.home, &nd7)
-                        && !agent_config::codex_hooks_trusted(
-                            &policy.home.join(".codex/config.toml"),
-                            &nd7,
-                        ) =>
-                {
-                    " (hooks: installed, not yet trusted; run `nd7 init codex` to record Codex's approval)"
-                }
-                Some(agent) if installed(agent, &policy.home, &nd7) => " (hooks: installed)",
-                Some(_) => " (hooks: per-invocation; run `nd7 init` to install them)",
-                None => "",
-            }
-        );
-
-        let mut cmd = nd7_core::sandbox::spawn_with_profile(&policy.render_floor(), program, &[]);
-        // The hook nd7 installs runs for every session the agent starts, so it
-        // needs to know which of them are nd7's.
-        cmd.env("ND7_SESSION", std::process::id().to_string());
-        if let Some(sock) = &policy.ssh_agent {
-            cmd.env("SSH_AUTH_SOCK", sock);
-        }
-        cmd.env(
-            "PATH",
-            env::join_paths(
-                std::iter::once(bin)
-                    .chain(env::split_paths(&env::var_os("PATH").unwrap_or_default())),
-            )?,
-        );
-        if let Some(dir) = &gnupg {
-            cmd.env("GNUPGHOME", dir);
-        }
-
-        let args: Vec<String> = args.collect();
-        match agent {
-            Some(Agent::Claude) => {
-                cmd.args(claude_flags(&policy.home, &nd7)).args(&args);
-            }
-            Some(Agent::Codex) => {
-                // Codex applies a `-c` override to a subcommand only when it
-                // follows the subcommand: `codex -c hooks.… exec` accepts the
-                // flag and never runs the hook, `codex exec -c hooks.…` does
-                // (measured, 0.155.1). So the flags go after `exec` or
-                // `resume` when that is how codex was invoked, and first
-                // otherwise, for the TUI.
-                let (sub, rest) = match args.first().map(String::as_str) {
-                    Some("exec" | "e" | "resume") => (&args[..1], &args[1..]),
-                    _ => (&args[..0], &args[..]),
-                };
-                cmd.args(sub)
-                    .args(codex_flags(&policy.home, &nd7))
-                    .args(rest);
-            }
-            None => {
-                cmd.args(&args);
-            }
-        }
-        let status = cmd.status()?;
-        if let Some(dir) = gnupg {
-            let _ = fs::remove_dir_all(dir);
-        }
-        drop(session);
-        Ok(status)
-    }
-
-    /// The exit binary is the one thing allowed out of the sandbox, so it
-    /// must exist and be writable by nobody but its owner.
-    fn trusted(exit: &std::path::Path) -> Result<()> {
-        use std::os::unix::fs::PermissionsExt;
-        let meta = std::fs::metadata(exit)
-            .map_err(|e| format!("nd7-exec not found at {}: {e}", exit.display()))?;
-        if !meta.is_file() {
-            return Err(format!("{} is not a file", exit.display()).into());
-        }
-        for path in [exit, exit.parent().unwrap_or(exit)] {
-            let mode = std::fs::metadata(path)?.permissions().mode();
-            if mode & 0o022 != 0 {
-                return Err(format!(
-                    "{} is writable by group or others (mode {:o}); refusing to use it as the sandbox exit",
-                    path.display(),
-                    mode & 0o777
-                )
-                .into());
-            }
-        }
-        Ok(())
-    }
+    use std::os::unix::process::ExitStatusExt;
 
     // `--profile` is ours only before the program: from the program on, every
     // argument is the child's, including the ones that look like options.
@@ -421,13 +216,220 @@ fn run(mut args: impl Iterator<Item = String>) -> ExitCode {
     }
 }
 
+/// Seatbelt takes its parameters as strings, so a path that is not UTF-8
+/// cannot be one.
+#[cfg(target_os = "macos")]
+fn param(path: PathBuf) -> Result<String> {
+    path.into_os_string()
+        .into_string()
+        .map_err(|path| format!("path is not UTF-8: {path:?}").into())
+}
+
+/// `--profile <file>`: the raw profile, with PROJ, TMP and HOME as
+/// parameters, and no session. For experiments.
+#[cfg(target_os = "macos")]
+fn spawn_raw(path: &str, program: &str, args: impl Iterator<Item = String>) -> Result<ExitStatus> {
+    let profile = std::fs::read_to_string(path)?;
+    // `subpath` matches resolved paths, so the parameters are canonical.
+    let proj = param(env::current_dir()?.canonicalize()?)?;
+    let tmp = param(env::temp_dir().canonicalize()?)?;
+    let home = param(nd7_core::session::home()?)?;
+    let params = [("PROJ", &*proj), ("TMP", &*tmp), ("HOME", &*home)];
+    Ok(
+        nd7_core::sandbox::spawn_with_profile(&profile, program, &params)
+            .args(args)
+            .status()?,
+    )
+}
+
+/// The real thing: a session with this run's policy, and the floor
+/// rendered from it applied to the program and everything it spawns.
+#[cfg(target_os = "macos")]
+fn spawn(program: &str, args: impl Iterator<Item = String>) -> Result<ExitStatus> {
+    use std::fs;
+
+    use nd7_core::{policy::Policy, session::Session};
+
+    let state = nd7_core::session_log::state_root()?;
+    fs::create_dir_all(&state)?;
+
+    let session = Session::create(&nd7_core::session::sessions_root()?)?;
+    let upstream = env::var_os("SSH_AUTH_SOCK").map(PathBuf::from);
+
+    let policy = Policy {
+        project: env::current_dir()?.canonicalize()?,
+        state: state.canonicalize()?,
+        tmp: env::temp_dir().canonicalize()?,
+        exit: exit_path()?,
+        home: nd7_core::session::home()?,
+        grants: Vec::new(),
+        ssh_agent: upstream.is_some().then(|| session.dir().join("ssh.sock")),
+        open_sock: session.dir().join("open.sock"),
+    };
+    trusted(&policy.exit)?;
+    session.write_policy(&policy)?;
+
+    if let (Some(sock), Some(upstream)) = (policy.ssh_agent.as_deref(), upstream) {
+        nd7_core::ssh_proxy::serve(sock, upstream, &state.join("ssh-agent.log"))?;
+    }
+
+    let nd7 = nd7_binary()?;
+    let bin = open_shim(
+        session.dir(),
+        &nd7,
+        &policy.open_sock,
+        &state.join("open.log"),
+    )?;
+    let gnupg = gpg_stand_in(&policy.home);
+
+    let agent = agent_of(program);
+    eprintln!(
+        "nd7 run: session {} under nd7's policy; a sandbox the program applies itself is refused{}",
+        std::process::id(),
+        hooks_note(agent, &policy.home, &nd7)
+    );
+
+    let mut cmd = nd7_core::sandbox::spawn_with_profile(&policy.render_floor(), program, &[]);
+    // The hook nd7 installs runs for every session the agent starts, so it
+    // needs to know which of them are nd7's.
+    cmd.env("ND7_SESSION", std::process::id().to_string());
+    if let Some(sock) = &policy.ssh_agent {
+        cmd.env("SSH_AUTH_SOCK", sock);
+    }
+    cmd.env(
+        "PATH",
+        env::join_paths(
+            std::iter::once(bin).chain(env::split_paths(&env::var_os("PATH").unwrap_or_default())),
+        )?,
+    );
+    if let Some(dir) = &gnupg {
+        cmd.env("GNUPGHOME", dir);
+    }
+
+    let args: Vec<String> = args.collect();
+    match agent {
+        Some(Agent::Claude) => {
+            cmd.args(claude_flags(&policy.home, &nd7)).args(&args);
+        }
+        Some(Agent::Codex) => {
+            // Codex applies a `-c` override to a subcommand only when it
+            // follows the subcommand: `codex -c hooks.… exec` accepts the
+            // flag and never runs the hook, `codex exec -c hooks.…` does
+            // (measured, 0.155.1). So the flags go after `exec` or
+            // `resume` when that is how codex was invoked, and first
+            // otherwise, for the TUI.
+            let (sub, rest) = match args.first().map(String::as_str) {
+                Some("exec" | "e" | "resume") => (&args[..1], &args[1..]),
+                _ => (&args[..0], &args[..]),
+            };
+            cmd.args(sub)
+                .args(codex_flags(&policy.home, &nd7))
+                .args(rest);
+        }
+        None => {
+            cmd.args(&args);
+        }
+    }
+    let status = cmd.status()?;
+    if let Some(dir) = gnupg {
+        let _ = fs::remove_dir_all(dir);
+    }
+    Ok(status)
+}
+
+/// The exit binary is the one thing allowed out of the sandbox, so it
+/// must exist and be writable by nobody but its owner.
+#[cfg(target_os = "macos")]
+fn trusted(exit: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = std::fs::metadata(exit)
+        .map_err(|e| format!("nd7-exec not found at {}: {e}", exit.display()))?;
+    if !meta.is_file() {
+        return Err(format!("{} is not a file", exit.display()).into());
+    }
+    for path in [exit, exit.parent().unwrap_or(exit)] {
+        let mode = std::fs::metadata(path)?.permissions().mode();
+        if mode & 0o022 != 0 {
+            return Err(format!(
+                "{} is writable by group or others (mode {:o}); refusing to use it as the sandbox exit",
+                path.display(),
+                mode & 0o777
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+/// Writes the `open` shim into the session, starts the broker behind it, and
+/// returns the directory to put first on the program's PATH. Claude Code signs
+/// in by running the bare name `open`; what it finds there is the shim, so
+/// what it gets is a request to the broker, which opens the URL outside the
+/// sandbox.
+#[cfg(target_os = "macos")]
+fn open_shim(session: &Path, nd7: &Path, sock: &Path, log: &Path) -> Result<PathBuf> {
+    use std::{fs, os::unix::fs::PermissionsExt};
+
+    let bin = session.join("bin");
+    fs::create_dir_all(&bin)?;
+    let shim = bin.join("open");
+    fs::write(
+        &shim,
+        format!("#!/bin/sh\nexec \"{}\" open \"$@\"\n", nd7.display()),
+    )?;
+    fs::set_permissions(&shim, fs::Permissions::from_mode(0o755))?;
+    nd7_core::open_proxy::serve(sock, log, Path::new("/usr/bin/open"))?;
+    Ok(bin)
+}
+
+/// The GNUPGHOME this run gets, so gpg can still sign under the floor. None
+/// when the user set one themselves: gpg then looks for the agent in that
+/// directory, the profile denies it, and signing fails closed. None too when
+/// there is no `~/.gnupg` to stand in for.
+#[cfg(target_os = "macos")]
+fn gpg_stand_in(home: &Path) -> Option<PathBuf> {
+    // A sandboxed gpg cannot start an agent, so start it while we still can.
+    let _ = std::process::Command::new("gpgconf")
+        .args(["--launch", "gpg-agent"])
+        .status();
+    if env::var_os("GNUPGHOME").is_some() {
+        return None;
+    }
+    let dir = env::temp_dir().join(format!("nd7-gpg-{}", std::process::id()));
+    match gpg_home(home, &dir) {
+        Ok(true) => Some(dir),
+        Ok(false) => None,
+        Err(e) => {
+            eprintln!("nd7 run: gpg signing unavailable: {e}");
+            None
+        }
+    }
+}
+
+/// What the startup message says about the Bash hook: in the agent's own
+/// configuration, on the command line, or there but no longer approved.
+#[cfg(target_os = "macos")]
+fn hooks_note(agent: Option<Agent>, home: &Path, nd7: &Path) -> &'static str {
+    match agent {
+        Some(Agent::Codex)
+            if installed(Agent::Codex, home, nd7)
+                && !agent_config::codex_hooks_trusted(&home.join(".codex/config.toml"), nd7) =>
+        {
+            " (hooks: installed, not yet trusted; run `nd7 init codex` to record Codex's approval)"
+        }
+        Some(agent) if installed(agent, home, nd7) => " (hooks: installed)",
+        Some(_) => " (hooks: per-invocation; run `nd7 init` to install them)",
+        None => "",
+    }
+}
+
 /// `program` resolved the way `Command` will resolve it — as a path when it
 /// contains a `/`, on PATH otherwise — and then canonicalized, because an
 /// installed agent is often a chain of symlinks (`~/.local/bin/codex` is two
 /// hops from the real file).
-fn resolve(program: &str) -> Option<std::path::PathBuf> {
+fn resolve(program: &str) -> Option<PathBuf> {
     if program.contains('/') {
-        std::path::Path::new(program).canonicalize().ok()
+        Path::new(program).canonicalize().ok()
     } else {
         let path = env::var_os("PATH").unwrap_or_default();
         env::split_paths(&path).find_map(|dir| dir.join(program).canonicalize().ok())
@@ -440,7 +442,7 @@ fn resolve(program: &str) -> Option<std::path::PathBuf> {
 #[cfg(target_os = "macos")]
 fn agent_of(program: &str) -> Option<Agent> {
     let resolved = resolve(program);
-    let name = resolved.as_deref().unwrap_or(std::path::Path::new(program));
+    let name = resolved.as_deref().unwrap_or(Path::new(program));
     match name.file_name()?.to_str()? {
         "claude" => Some(Agent::Claude),
         "codex" => Some(Agent::Codex),
@@ -451,7 +453,7 @@ fn agent_of(program: &str) -> Option<Agent> {
 /// Whether this agent's own configuration already runs this nd7 as its
 /// `PreToolUse` hook, in which case the flags leave the hook out.
 #[cfg(target_os = "macos")]
-fn installed(agent: Agent, home: &std::path::Path, nd7: &std::path::Path) -> bool {
+fn installed(agent: Agent, home: &Path, nd7: &Path) -> bool {
     match agent {
         Agent::Claude => agent_config::claude_has_hook(&home.join(".claude/settings.json"), nd7),
         Agent::Codex => agent_config::codex_has_hook(&home.join(".codex/config.toml"), nd7),
@@ -465,7 +467,7 @@ fn installed(agent: Agent, home: &std::path::Path, nd7: &std::path::Path) -> boo
 /// line in the system prompt so a denial is read as nd7's and not as Claude
 /// Code's own rules.
 #[cfg(target_os = "macos")]
-fn claude_flags(home: &std::path::Path, nd7: &std::path::Path) -> Vec<String> {
+fn claude_flags(home: &Path, nd7: &Path) -> Vec<String> {
     let mut settings = serde_json::json!({ "sandbox": { "enabled": false } });
     if !installed(Agent::Claude, home, nd7) {
         let hook = format!("{} hook-prefix", nd7.display());
@@ -495,7 +497,7 @@ fn claude_flags(home: &std::path::Path, nd7: &std::path::Path) -> Vec<String> {
 /// `-c approval_policy="never"` is deliberately not here: an interactive user
 /// should keep the approvals. `codex exec` runs unattended, so add it there.
 #[cfg(target_os = "macos")]
-fn codex_flags(home: &std::path::Path, nd7: &std::path::Path) -> Vec<String> {
+fn codex_flags(home: &Path, nd7: &Path) -> Vec<String> {
     let mut flags = vec!["-s".to_owned(), "danger-full-access".to_owned()];
     let config = home.join(".codex/config.toml");
     if !installed(Agent::Codex, home, nd7) {
@@ -575,7 +577,7 @@ fn open(args: impl Iterator<Item = String>) -> ExitCode {
         return ExitCode::from(1);
     };
     let asked = || -> Result<String> {
-        let sock = sessions_root(&nd7_core::session::home()?)
+        let sock = nd7_core::session::sessions_root()?
             .join(session)
             .join("open.sock");
         let mut broker = UnixStream::connect(sock)?;
@@ -690,38 +692,46 @@ fn init_agents(args: impl Iterator<Item = String>) -> Result<()> {
     }
 
     if aliases {
-        let mut on_path = Vec::new();
-        for &agent in &agents {
-            if resolve(agent.name()).is_some() {
-                on_path.push(agent);
-            } else {
-                println!("{agent}: not on PATH; no alias written");
-            }
-        }
-        if !on_path.is_empty() {
-            let lines = agent_config::install_aliases(&home, &on_path)?;
-            println!(
-                "aliases: {} ({})",
-                home.join(".nd7/aliases.sh").display(),
-                lines.join("; ")
-            );
-            // zsh is macOS's login shell, so its rc is created if it is
-            // missing; bash's is only added to when the user has one.
-            let bashrc = home.join(".bashrc");
-            for rc in [home.join(".zshrc")]
-                .into_iter()
-                .chain(bashrc.is_file().then_some(bashrc))
-            {
-                let added = agent_config::source_aliases(&rc)?;
-                println!(
-                    "{}: {} them",
-                    rc.display(),
-                    if added { "now loads" } else { "already loads" }
-                );
-            }
-            println!("restart your shell or run: source ~/.nd7/aliases.sh");
+        write_aliases(&home, &agents)?;
+    }
+    Ok(())
+}
+
+/// The aliases that start each agent under `nd7 run`, and the line that loads
+/// them from the user's shell rc. An agent that is not on PATH gets none.
+fn write_aliases(home: &Path, agents: &[Agent]) -> Result<()> {
+    let mut on_path = Vec::new();
+    for &agent in agents {
+        if resolve(agent.name()).is_some() {
+            on_path.push(agent);
+        } else {
+            println!("{agent}: not on PATH; no alias written");
         }
     }
+    if on_path.is_empty() {
+        return Ok(());
+    }
+    let lines = agent_config::install_aliases(home, &on_path)?;
+    println!(
+        "aliases: {} ({})",
+        home.join(".nd7/aliases.sh").display(),
+        lines.join("; ")
+    );
+    // zsh is macOS's login shell, so its rc is created if it is missing;
+    // bash's is only added to when the user has one.
+    let bashrc = home.join(".bashrc");
+    for rc in [home.join(".zshrc")]
+        .into_iter()
+        .chain(bashrc.is_file().then_some(bashrc))
+    {
+        let added = agent_config::source_aliases(&rc)?;
+        println!(
+            "{}: {} them",
+            rc.display(),
+            if added { "now loads" } else { "already loads" }
+        );
+    }
+    println!("restart your shell or run: source ~/.nd7/aliases.sh");
     Ok(())
 }
 
@@ -731,7 +741,6 @@ fn init_agents(args: impl Iterator<Item = String>) -> Result<()> {
 /// `~/.nd7` and under the nd7 state root, the two places holding nd7's own
 /// records, which no policy may ever make writable.
 fn grant(verb: &str, mut args: impl Iterator<Item = String>) -> Result<String> {
-    use std::path::PathBuf;
     let (mut session, mut path) = (None, None);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -804,26 +813,16 @@ fn grant(verb: &str, mut args: impl Iterator<Item = String>) -> Result<String> {
     })
 }
 
-/// Where sessions are recorded. Must agree with `nd7-exec`, which derives
-/// it from passwd; the override exists for the tests only.
-fn sessions_root(home: &std::path::Path) -> std::path::PathBuf {
-    #[cfg(feature = "test-seams")]
-    if let Some(p) = env::var_os("ND7_SESSIONS_DIR") {
-        return std::path::PathBuf::from(p);
-    }
-    home.join(".nd7/sessions")
-}
-
 /// This binary, resolved: the hook command and the exit path are derived
 /// from it, so `nd7 run` and the hook it installs always agree.
-fn nd7_binary() -> Result<std::path::PathBuf> {
+fn nd7_binary() -> Result<PathBuf> {
     Ok(env::current_exe()?.canonicalize()?)
 }
 
 /// `nd7-exec`, installed next to this binary. The floor lets exactly this
 /// path out of the sandbox, so it is found by where nd7 itself is, never by
 /// anything in the environment.
-fn exit_path() -> Result<std::path::PathBuf> {
+fn exit_path() -> Result<PathBuf> {
     Ok(nd7_binary()?.with_file_name("nd7-exec"))
 }
 
@@ -874,7 +873,7 @@ fn parse_duration(s: &str) -> Result<Duration> {
 /// only one the profile lets a session reach. False when there is no
 /// `~/.gnupg`, so nothing to stand in for.
 #[cfg(target_os = "macos")]
-fn gpg_home(home: &std::path::Path, dir: &std::path::Path) -> io::Result<bool> {
+fn gpg_home(home: &Path, dir: &Path) -> io::Result<bool> {
     use std::{
         fs,
         os::unix::fs::{DirBuilderExt, symlink},

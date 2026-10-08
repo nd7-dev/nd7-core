@@ -1,7 +1,8 @@
 //! What a session is allowed to do, and the two Seatbelt profiles that say so.
 //!
-//! [`Policy`] is the whole of it: four fixed paths and the write roots
-//! `nd7 allow` has added. Two profiles are rendered from it, sharing one body:
+//! [`Policy`] is the whole of it: the fixed paths a run is pinned to, the two
+//! sockets it serves, and the write roots `nd7 allow` has added. Two profiles
+//! are rendered from it, sharing one body:
 //!
 //! - [`Policy::render_floor`] is what `nd7 run` applies to claude and its
 //!   whole process tree. It lets exactly one program out of the sandbox,
@@ -45,9 +46,9 @@ pub struct Policy {
     /// only ever in the per-command profile.
     pub grants: Vec<PathBuf>,
 
-    /// We want to set a proxied ssh agent when there is an upstream agent. If there is not
-    /// ssh agent present as upstream, this should be None since we don't need a proxied
-    /// socket then.
+    /// The ssh-agent socket `nd7 run` serves inside the session, which
+    /// forwards every message to the user's own agent. None when there is no
+    /// agent to forward to, and then nothing in the session speaks it.
     pub ssh_agent: Option<PathBuf>,
 
     /// The socket `nd7 run` serves for `open`: a shim first on the program's
