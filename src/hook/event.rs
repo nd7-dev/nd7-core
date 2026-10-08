@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use super::{
-    input::{Common, HookEvent, HookInput, PermissionMode},
+    input::{Common, HookEvent, HookInput},
     invocation::Invocation,
 };
 
@@ -23,7 +23,13 @@ pub const SCHEMA_VERSION: u16 = 0;
 pub const SOURCE_CLAUDE_CODE: &str = "intent:claude-code";
 
 /// One frame of the session log.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// Frames are written here and read back only by the tests, so `Deserialize`
+/// is theirs alone. [`Detail`] is untagged, so a frame read back takes the
+/// first variant that fits: a `session_end` body returns as
+/// [`Detail::SessionStart`].
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 pub struct Event {
     pub v: u16,
     pub session_id: String,
@@ -91,23 +97,10 @@ pub enum Kind {
     Hook,
 }
 
-impl Kind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Kind::SessionStart => "session_start",
-            Kind::Prompt => "prompt",
-            Kind::ToolCall => "tool_call",
-            Kind::ToolResult => "tool_result",
-            Kind::SessionEnd => "session_end",
-            Kind::TurnEnd => "turn_end",
-            Kind::Hook => "hook",
-        }
-    }
-}
-
 /// Body of an `intent:claude-code` event: the common section shared by every
 /// kind, then the kind-specific fields flattened alongside it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 pub struct Body {
     /// Agent's working directory at the hook. Join key for effects.
     pub cwd: String,
@@ -132,7 +125,8 @@ pub struct Body {
 }
 
 /// Kind-specific body fields. Untagged: `Event::kind` is the discriminant.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 #[serde(untagged)]
 pub enum Detail {
     SessionStart {
@@ -187,10 +181,15 @@ impl Event {
     /// Transform a parsed payload plus the invocation facts into one event.
     /// `seq`, `prev` and `hash` are left for the writer.
     pub fn new(input: HookInput, inv: Invocation) -> Event {
-        let HookInput { common, event, raw } = input;
+        let HookInput {
+            mut common,
+            event,
+            raw,
+        } = input;
         let (kind, detail) = Detail::from_hook_event(event, raw);
-        let session_id = common.session_id.clone();
-        let body = Body::new(common, Some(inv.hook_ppid), detail);
+        // The envelope takes the session id; the body never carries it.
+        let session_id = std::mem::take(&mut common.session_id);
+        let body = Body::new(common, inv.hook_ppid, detail);
         Event {
             v: SCHEMA_VERSION,
             session_id,
@@ -225,16 +224,16 @@ impl Event {
 }
 
 impl Body {
-    fn new(common: Common, hook_ppid: Option<u32>, detail: Detail) -> Body {
+    fn new(common: Common, hook_ppid: u32, detail: Detail) -> Body {
         Body {
             cwd: common.cwd,
             transcript_path: common.transcript_path,
             hook_event_name: common.hook_event_name,
-            permission_mode: common.permission_mode.map(permission_mode_str),
+            permission_mode: common.permission_mode.as_ref().map(enum_str),
             prompt_id: common.prompt_id,
             agent_id: common.agent_id,
             agent_type: common.agent_type,
-            hook_ppid,
+            hook_ppid: Some(hook_ppid),
             detail,
         }
     }
@@ -299,24 +298,20 @@ impl Detail {
                     last_assistant_message: e.last_assistant_message,
                 },
             ),
-            // Every other event, typed or not, is kept whole.
-            _ => (Kind::Hook, Detail::Hook { raw }),
+            // An event with no typed body is kept whole.
+            HookEvent::Other { .. } => (Kind::Hook, Detail::Hook { raw }),
         }
     }
 }
 
-fn permission_mode_str(mode: PermissionMode) -> String {
-    enum_str(&mode)
-}
-
-/// Wire string of a unit-variant enum with an untagged `Other(String)`
-/// fallback. All such enums serialize to a plain JSON string.
+/// Wire string of a payload enum whose variants are all plain strings. The
+/// three the body carries over — the two session reasons and the permission
+/// mode — serialize to a JSON string and to nothing else.
 fn enum_str<T: Serialize>(value: &T) -> String {
-    match serde_json::to_value(value) {
-        Ok(Value::String(s)) => s,
-        Ok(other) => other.to_string(),
-        Err(_) => String::new(),
-    }
+    let Ok(Value::String(s)) = serde_json::to_value(value) else {
+        panic!("a string-only payload enum serialized to something else")
+    };
+    s
 }
 
 fn hoist_argv(tool_name: &str, input: &Value) -> Option<String> {
@@ -447,6 +442,20 @@ mod tests {
         ));
         assert_eq!(ev.kind, Kind::Hook);
         assert_eq!(ev.body.hook_event_name, "Brand-New");
+    }
+
+    #[test]
+    fn a_documented_event_with_a_bad_body_is_still_recorded() {
+        // `PreCompact` is documented with a string `trigger`. Nothing here
+        // reads it, so a payload that gets it wrong is recorded, not refused.
+        let ev = transform(&format!(
+            r#"{{{BASE}, "hook_event_name": "PreCompact", "trigger": 7}}"#
+        ));
+        assert_eq!(ev.kind, Kind::Hook);
+        let Detail::Hook { raw } = ev.body.detail else {
+            panic!()
+        };
+        assert_eq!(raw["trigger"], 7);
     }
 
     #[test]
