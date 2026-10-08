@@ -2,7 +2,7 @@
 //! These exercise the real kernel sandbox: every test spawns a program under an
 //! Apple Seatbelt profile and observes what the kernel actually allows.
 
-use nd7_core::{sandbox::spawn_with_profile, sbprofiles};
+use nd7_core::sandbox::spawn_with_profile;
 use std::{
     env, fs,
     net::TcpListener,
@@ -39,28 +39,6 @@ fn canonical(dir: &Path) -> String {
 
 fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
-}
-
-#[test]
-fn permissive_profile_runs_program() {
-    let root = scratch("permissive");
-    for sub in ["proj", "tmp", "home"] {
-        fs::create_dir_all(root.join(sub)).unwrap();
-    }
-    let proj = canonical(&root.join("proj"));
-    let tmp = canonical(&root.join("tmp"));
-    let home = canonical(&root.join("home"));
-
-    let params = [("PROJ", &*proj), ("TMP", &*tmp), ("HOME", &*home)];
-    let out = spawn_with_profile(sbprofiles::CLAUDE, "/bin/sh", &params)
-        .args(["-c", "echo ok"])
-        .output()
-        .unwrap();
-
-    assert!(out.status.success(), "stderr: {}", stderr(&out));
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "ok\n");
-
-    fs::remove_dir_all(&root).unwrap();
 }
 
 #[test]

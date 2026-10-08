@@ -8,8 +8,12 @@
 //!   transform between them. Pure; no I/O.
 //! - [`hook_prefix`]: the `PreToolUse` reply that routes Claude Code's Bash
 //!   commands through `nd7-exec`. Pure; no I/O.
+//! - [`open_proxy`]: the socket `nd7 run` serves for the `open` shim, which
+//!   opens a URL from outside the sandbox the shim's caller is in.
 //! - [`policy`]: what a session may do, rendered as the two Seatbelt
 //!   profiles that enforce it. Pure; no I/O.
+//! - [`sandbox`]: applying a Seatbelt profile, to this process or to one it
+//!   spawns. macOS only.
 //! - [`session`]: the directory one `nd7 run` owns, where `nd7-exec` finds
 //!   the policy it applies to each command.
 //! - [`session_log`]: the append-only per-session log. The only module that knows
@@ -22,7 +26,7 @@
 //! - [`ssh_proxy`]: the ssh-agent socket `nd7 run` hands the program, which
 //!   forwards every message to the user's own agent and logs it.
 //! - [`vault`]: the wire format and cryptography the machine and the vault
-//!   server share. Pure; no I/O.
+//!   server share. No files and no network; it reads the OS random source.
 
 pub mod agent_config;
 pub mod hook;
@@ -31,7 +35,6 @@ pub mod open_proxy;
 pub mod policy;
 #[cfg(target_os = "macos")]
 pub mod sandbox;
-pub mod sbprofiles;
 pub mod session;
 pub mod session_log;
 pub mod ship;

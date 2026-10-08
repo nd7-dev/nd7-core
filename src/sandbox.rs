@@ -19,10 +19,8 @@ fn apply(profile: &CStr, params: &[*const c_char]) -> Result<(), String> {
     let rc =
         unsafe { sandbox_init_with_parameters(profile.as_ptr(), 0, params.as_ptr(), &mut err) };
     if rc == 0 {
-        // init sandbox succeeded
         return Ok(());
     }
-    // init sandbox failed
     if !err.is_null() {
         let msg = unsafe { CStr::from_ptr(err) }
             .to_string_lossy()
@@ -31,7 +29,6 @@ fn apply(profile: &CStr, params: &[*const c_char]) -> Result<(), String> {
         unsafe { sandbox_free_error(err) };
         return Err(msg);
     }
-    // init sandbox failed, and error failed as well. Should not happen in practice.
     Err("failed to init sandbox. Sandbox failed silently".into())
 }
 
