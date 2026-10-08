@@ -3,6 +3,7 @@
 //! what each message means lives in [`crate::ssh_agent`].
 
 use std::{
+    fs::{File, OpenOptions},
     io::{self, Write},
     os::unix::net::{UnixListener, UnixStream},
     path::{Path, PathBuf},
@@ -11,7 +12,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::ssh_agent::{Message, read_frame, write_frame};
+use crate::ssh_agent::{describe, read_frame, write_frame};
 
 /// Serves `sock` as the program's ssh-agent: each connection is one thread
 /// that forwards every request to the agent at `upstream` and every reply
@@ -19,58 +20,57 @@ use crate::ssh_agent::{Message, read_frame, write_frame};
 /// is forwarded. Returns once the socket is bound and the log is open.
 pub fn serve(sock: &Path, upstream: PathBuf, log: &Path) -> io::Result<()> {
     let log = Arc::new(Mutex::new(
-        std::fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(log)?,
+        OpenOptions::new().append(true).create(true).open(log)?,
     ));
     let listener = UnixListener::bind(sock)?;
     thread::spawn(move || {
-        for (conn, mut client) in listener.incoming().flatten().enumerate() {
+        for (index, client) in listener.incoming().flatten().enumerate() {
             let (upstream, log) = (upstream.clone(), Arc::clone(&log));
-            thread::spawn(move || {
-                let Ok(mut agent) = UnixStream::connect(upstream) else {
-                    return;
-                };
-                let note = |dir: &str, frame: &[u8]| {
-                    let at = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
-                    // ssh must never wait on the log, so a write that
-                    // fails is one line lost, not an error.
-                    if let Ok(mut log) = log.lock() {
-                        let _ = writeln!(
-                            log,
-                            "{at} {} {} {dir} {}",
-                            std::process::id(),
-                            conn + 1,
-                            Message::parse(frame)
-                        );
-                    }
-                };
-                loop {
-                    let Ok(request) = read_frame(&mut client) else {
-                        return;
-                    };
-                    note(">", &request);
-                    let Ok(reply) =
-                        write_frame(&mut agent, &request).and_then(|()| read_frame(&mut agent))
-                    else {
-                        return;
-                    };
-                    note("<", &reply);
-                    if write_frame(&mut client, &reply).is_err() {
-                        return;
-                    }
-                }
-            });
+            thread::spawn(move || proxy(index + 1, client, &upstream, &log));
         }
     });
     Ok(())
 }
 
-#[cfg(all(test, unix))]
+/// Carries one connection's messages to the agent at `upstream` and back,
+/// until either side stops. `conn` numbers the connection in the log.
+fn proxy(conn: usize, mut client: UnixStream, upstream: &Path, log: &Mutex<File>) {
+    let Ok(mut agent) = UnixStream::connect(upstream) else {
+        return;
+    };
+    let note = |dir: &str, frame: &[u8]| {
+        let at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        // ssh must never wait on the log, so a write that fails is one line
+        // lost, not an error.
+        if let Ok(mut log) = log.lock() {
+            let _ = writeln!(
+                log,
+                "{at} {} {conn} {dir} {}",
+                std::process::id(),
+                describe(frame)
+            );
+        }
+    };
+    loop {
+        let Ok(request) = read_frame(&mut client) else {
+            return;
+        };
+        note(">", &request);
+        let Ok(reply) = write_frame(&mut agent, &request).and_then(|()| read_frame(&mut agent))
+        else {
+            return;
+        };
+        note("<", &reply);
+        if write_frame(&mut client, &reply).is_err() {
+            return;
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::fs;
 

@@ -7,10 +7,9 @@
 //!
 //! This module reads those frames and describes them. It decides nothing: it
 //! never rejects, rewrites or answers a message, and a frame it cannot decode
-//! becomes [`Message::Malformed`] rather than an error. The
-//! [`Display`](std::fmt::Display) of a [`Message`] is the line the ssh-agent
-//! log shows, one per message, so what the program asked its agent for is
-//! there to read.
+//! is named as malformed rather than refused. [`describe`] returns the line
+//! the ssh-agent log shows, one per message, so what the program asked its
+//! agent for is there to read.
 
 use std::{
     fmt,
@@ -130,16 +129,16 @@ impl<'a> Cursor<'a> {
 }
 
 /// One key the agent holds or is asked to sign with.
-pub struct Key {
+struct Key {
     /// The key's algorithm, the first `string` of its blob, such as
     /// `ssh-ed25519`.
-    pub kind: String,
+    kind: String,
     /// `SHA256:` and the base64 SHA-256 of the whole blob, the fingerprint
     /// `ssh-add -l` prints.
-    pub fingerprint: String,
+    fingerprint: String,
     /// The comment the agent stores beside the key, where a message carries
     /// one.
-    pub comment: Option<String>,
+    comment: Option<String>,
 }
 
 /// Reads a key blob: `string kind` first, and the digest over all of it.
@@ -158,7 +157,7 @@ fn text(bytes: &[u8]) -> String {
 }
 
 /// One message on the wire, as much of it as the log names.
-pub enum Message {
+enum Message {
     RequestIdentities,
     IdentitiesAnswer(Vec<Key>),
     SignRequest {
@@ -193,14 +192,15 @@ pub enum Message {
     },
 }
 
-impl Message {
-    /// Never panics; anything it cannot decode becomes `Malformed`.
-    pub fn parse(frame: &[u8]) -> Message {
-        decode(frame).unwrap_or(Message::Malformed {
+/// The log line for one frame: what the message is and what it names. Never
+/// fails; a frame this module cannot decode is named as malformed.
+pub fn describe(frame: &[u8]) -> String {
+    decode(frame)
+        .unwrap_or(Message::Malformed {
             kind: frame.first().copied().unwrap_or(0),
             len: frame.len(),
         })
-    }
+        .to_string()
 }
 
 fn decode(frame: &[u8]) -> Option<Message> {
@@ -363,13 +363,9 @@ mod tests {
         out
     }
 
-    fn line(frame: &[u8]) -> String {
-        Message::parse(frame).to_string()
-    }
-
     #[test]
     fn request_identities() {
-        assert_eq!(line(&[REQUEST_IDENTITIES]), "REQUEST_IDENTITIES");
+        assert_eq!(describe(&[REQUEST_IDENTITIES]), "REQUEST_IDENTITIES");
     }
 
     #[test]
@@ -381,7 +377,7 @@ mod tests {
         put_string(&mut frame, &blob("ssh-rsa", b"two"));
         put_string(&mut frame, b"work");
 
-        let text = line(&frame);
+        let text = describe(&frame);
         assert!(
             text.starts_with("IDENTITIES_ANSWER 2 keys: ssh-ed25519 SHA256:"),
             "{text}"
@@ -394,7 +390,7 @@ mod tests {
     fn identities_answer_with_no_keys() {
         let mut frame = vec![IDENTITIES_ANSWER];
         put_u32(&mut frame, 0);
-        assert_eq!(line(&frame), "IDENTITIES_ANSWER 0 keys");
+        assert_eq!(describe(&frame), "IDENTITIES_ANSWER 0 keys");
     }
 
     #[test]
@@ -403,7 +399,7 @@ mod tests {
         put_u32(&mut frame, 2);
         put_string(&mut frame, &blob("ssh-ed25519", b"one"));
         put_string(&mut frame, b"ahmed@mac");
-        assert_eq!(line(&frame), "MALFORMED IDENTITIES_ANSWER 44 bytes");
+        assert_eq!(describe(&frame), "MALFORMED IDENTITIES_ANSWER 44 bytes");
     }
 
     /// `string session_id`, `byte 50`, `string user`, `string service`.
@@ -426,7 +422,7 @@ mod tests {
 
     #[test]
     fn sign_request_names_the_user_and_service() {
-        let text = line(&sign_request(&userauth_data(USERAUTH_REQUEST)));
+        let text = describe(&sign_request(&userauth_data(USERAUTH_REQUEST)));
         assert!(
             text.starts_with("SIGN_REQUEST key ssh-ed25519 SHA256:"),
             "{text}"
@@ -439,7 +435,7 @@ mod tests {
 
     #[test]
     fn sign_request_over_other_data_names_neither() {
-        let text = line(&sign_request(&userauth_data(51)));
+        let text = describe(&sign_request(&userauth_data(51)));
         assert!(
             text.starts_with("SIGN_REQUEST key ssh-ed25519 SHA256:"),
             "{text}"
@@ -452,7 +448,7 @@ mod tests {
     #[test]
     fn short_sign_request_is_malformed() {
         assert_eq!(
-            line(&[SIGN_REQUEST, 0, 0, 0, 9, 9]),
+            describe(&[SIGN_REQUEST, 0, 0, 0, 9, 9]),
             "MALFORMED SIGN_REQUEST 6 bytes"
         );
     }
@@ -461,14 +457,14 @@ mod tests {
     fn sign_response_counts_the_signature() {
         let mut frame = vec![SIGN_RESPONSE];
         put_string(&mut frame, &[7u8; 83]);
-        assert_eq!(line(&frame), "SIGN_RESPONSE 83 bytes");
+        assert_eq!(describe(&frame), "SIGN_RESPONSE 83 bytes");
     }
 
     #[test]
     fn the_plain_answers() {
-        assert_eq!(line(&[SUCCESS]), "SUCCESS");
-        assert_eq!(line(&[FAILURE]), "FAILURE");
-        assert_eq!(line(&[EXTENSION_FAILURE]), "EXTENSION_FAILURE");
+        assert_eq!(describe(&[SUCCESS]), "SUCCESS");
+        assert_eq!(describe(&[FAILURE]), "FAILURE");
+        assert_eq!(describe(&[EXTENSION_FAILURE]), "EXTENSION_FAILURE");
     }
 
     #[test]
@@ -480,7 +476,7 @@ mod tests {
         put_string(&mut frame, b"signature");
         frame.push(0);
 
-        let text = line(&frame);
+        let text = describe(&frame);
         assert!(
             text.starts_with("EXTENSION session-bind@openssh.com host ssh-ed25519 SHA256:"),
             "{text}"
@@ -493,15 +489,15 @@ mod tests {
         let mut frame = vec![EXTENSION];
         put_string(&mut frame, b"query");
         put_string(&mut frame, b"ignored");
-        assert_eq!(line(&frame), "EXTENSION query");
+        assert_eq!(describe(&frame), "EXTENSION query");
     }
 
     #[test]
     fn undecoded_types_carry_their_size() {
         let mut frame = vec![ADD_IDENTITY];
         frame.extend_from_slice(&[0u8; 411]);
-        assert_eq!(line(&frame), "ADD_IDENTITY 412 bytes");
-        assert_eq!(line(&[99, 1, 2, 3, 4]), "TYPE_99 5 bytes");
+        assert_eq!(describe(&frame), "ADD_IDENTITY 412 bytes");
+        assert_eq!(describe(&[99, 1, 2, 3, 4]), "TYPE_99 5 bytes");
     }
 
     #[test]
