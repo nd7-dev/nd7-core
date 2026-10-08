@@ -16,9 +16,6 @@ use std::{
 #[cfg(target_os = "macos")]
 use nd7_core::sandbox;
 
-#[cfg(target_os = "macos")]
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
-
 #[cfg(not(target_os = "macos"))]
 fn main() -> ExitCode {
     eprintln!("nd7-exec: only supported on macOS");
@@ -74,14 +71,16 @@ fn run(cmd: &str) -> ExitCode {
     }
     // Out of the outer sandbox now: the only way to a shell is through a
     // successfully applied session policy.
-    let sessions_dir = match sessions_dir() {
+    // The environment is the caller's, and the caller is what we are
+    // defending against, so the root comes from passwd, via the library.
+    let sessions_dir = match nd7_core::session::sessions_root() {
         Ok(p) => p,
         Err(e) => return refuse(&e.to_string()),
     };
     let Some(session) = find_session(&sessions_dir) else {
         return refuse("no nd7 session in this process's ancestry");
     };
-    match policy(session) {
+    match policy(&session) {
         Some(policy) => exec_with_policy(&policy, cmd),
         None => refuse("session has no policy.sb"),
     }
@@ -105,19 +104,6 @@ fn exec_with_policy(policy: &Path, cmd: &str) -> ExitCode {
         Ok(()) => exec_shell(cmd),
         Err(e) => refuse(&format!("apply session policy: {e}")),
     }
-}
-
-#[cfg(target_os = "macos")]
-/// Where the session records live. The environment is the caller's, and the
-/// caller is what we are defending against, so this is `~/.nd7/sessions`
-/// with `~` from passwd, via the library. `ND7_SESSIONS_DIR` is a test seam and is only
-/// compiled in under the `test-seams` feature, never in a release build.
-fn sessions_dir() -> Result<PathBuf> {
-    #[cfg(feature = "test-seams")]
-    if let Some(dir) = std::env::var_os("ND7_SESSIONS_DIR") {
-        return Ok(PathBuf::from(dir));
-    }
-    Ok(nd7_core::session::sessions_root()?)
 }
 
 #[cfg(target_os = "macos")]
@@ -151,7 +137,7 @@ fn parent_of(pid: libc::pid_t) -> Option<libc::pid_t> {
 }
 
 #[cfg(target_os = "macos")]
-fn policy(session: PathBuf) -> Option<PathBuf> {
+fn policy(session: &Path) -> Option<PathBuf> {
     let policy_path = session.join("policy.sb");
     policy_path.exists().then_some(policy_path)
 }
@@ -247,11 +233,11 @@ mod tests {
     #[test]
     fn policy_is_found_only_when_the_file_is_there() {
         let dir = scratch("policy");
-        assert_eq!(policy(dir.clone()), None);
+        assert_eq!(policy(&dir), None);
 
         let path = dir.join("policy.sb");
         fs::write(&path, "(version 1)\n").unwrap();
-        assert_eq!(policy(dir.clone()), Some(path));
+        assert_eq!(policy(&dir), Some(path));
 
         fs::remove_dir_all(&dir).unwrap();
     }

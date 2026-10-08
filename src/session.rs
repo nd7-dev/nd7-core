@@ -109,8 +109,14 @@ pub fn home() -> io::Result<PathBuf> {
     Ok(PathBuf::from(std::ffi::OsStr::from_bytes(dir.to_bytes())))
 }
 
-/// `~/.nd7/sessions`, with `~` from passwd.
+/// `~/.nd7/sessions`, with `~` from passwd. Never `$HOME`, for the reason
+/// [`home`] gives. `ND7_SESSIONS_DIR` overrides it for the tests, and is
+/// compiled in only under the `test-seams` feature, never in a release build.
 pub fn sessions_root() -> io::Result<PathBuf> {
+    #[cfg(feature = "test-seams")]
+    if let Some(dir) = std::env::var_os("ND7_SESSIONS_DIR") {
+        return Ok(PathBuf::from(dir));
+    }
     Ok(home()?.join(".nd7/sessions"))
 }
 
