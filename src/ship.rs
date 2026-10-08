@@ -34,7 +34,9 @@ use base64::{Engine, engine::general_purpose::STANDARD as B64};
 
 use crate::{
     hook::{Invocation, invocation::now_ns},
-    session_log::{Head, SessionLog, state_root, verify_segment},
+    session_log::{
+        Head, SessionLog, TS, Tail, find, number, read_head, state_root, verify_segment,
+    },
     vault::{
         BatchAad, ChainKey, MachineKey, SignedRecipientSet, build_index, seal_batch,
         wire::{
@@ -63,7 +65,6 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 /// because a machine that pins the wrong keys encrypts everything to an
 /// attacker. Returns the vault-assigned machine id.
 pub fn enroll(server: &str, token: &str, rotate: bool) -> Result<String> {
-    check_server(server)?;
     let server = server.trim_end_matches('/');
     let (fingerprint, _) = token
         .split_once('.')
@@ -81,8 +82,6 @@ pub fn enroll(server: &str, token: &str, rotate: bool) -> Result<String> {
         host: Invocation::now().host,
         rotate,
     })?;
-    // The one unsigned request in the protocol (§6): the vault has no key
-    // for this machine yet, and the token is what stands in for one.
     let (status, answer) = send(&agent(), None, "POST", server, "/v1/enroll", body)?;
     if status != 201 {
         return Err(format!("the vault answered {status}: {}", text(&answer)).into());
@@ -171,7 +170,14 @@ fn run_once(prune_after: Option<Duration>, unreachable_code: u8) -> Result<u8> {
             continue;
         };
         let log = SessionLog::open_in(&root, &session_id)?;
-        match ship_session(&machine, &log, prune_after) {
+        // A session reports its own failures: anything unexpected on the
+        // local side stops this session rather than the run, because the next
+        // session's frames are unaffected.
+        let outcome = session(&machine, &log, prune_after).unwrap_or_else(|e| {
+            eprintln!("nd7 ship: {}: {e}", log.session_id());
+            Outcome::Stopped
+        });
+        match outcome {
             Outcome::Done => {}
             Outcome::Unreachable => unreachable = true,
             Outcome::Stopped => stopped = true,
@@ -198,19 +204,6 @@ enum Outcome {
     Stopped,
 }
 
-/// Ship one session, reporting its own failures: the caller only has to know
-/// how it ended. Anything unexpected on the local side stops this session
-/// rather than the run, because the next session's frames are unaffected.
-fn ship_session(machine: &Machine, log: &SessionLog, prune_after: Option<Duration>) -> Outcome {
-    match session(machine, log, prune_after) {
-        Ok(outcome) => outcome,
-        Err(e) => {
-            eprintln!("nd7 ship: {}: {e}", log.session_id());
-            Outcome::Stopped
-        }
-    }
-}
-
 /// §7 steps 2 to 9 for one session.
 ///
 /// The exclusive lock is taken for local work only and never held across a
@@ -227,176 +220,223 @@ fn session(machine: &Machine, log: &SessionLog, prune_after: Option<Duration>) -
     // §7 step 7 recovers from one lost acknowledgement per session per run.
     // A vault that keeps answering 409 with the same head therefore stops
     // the session instead of spinning.
-    let mut recovered = false;
+    let mut recover = true;
 
-    let outcome = 'resume: loop {
-        // Everything the session directory has to say, read under the lock:
-        // §7 steps 2 and 3, and the chain key.
-        let (shipped, pending, key) = {
-            let _lock = log.lock_exclusive()?;
-            // A session directory with no head has no frames to ship.
-            let Some(head) = log.read_head()? else {
-                break Outcome::Done;
-            };
-            let shipped = read_shipped(&shipped_path)?;
-            if shipped.as_ref() == Some(&head) {
-                break Outcome::Done;
-            }
-
-            // The pending bytes, found by reading backwards from the end.
-            let pending = match &shipped {
-                None => fs::read(log.events_path())?,
-                Some(shipped) => log.read_after_seq(shipped.seq)?.ok_or_else(|| {
-                    format!(
-                        "the log no longer holds frame {}, the last one the vault acknowledged",
-                        shipped.seq
-                    )
-                })?,
-            };
-            // Nothing after the shipped frame although `head` is a different
-            // frame: the two sidecars disagree, which no batch can fix.
-            if pending.is_empty() {
-                return Err(format!(
-                    "`shipped` and `head` name frame {} with different hashes",
-                    head.seq
-                )
-                .into());
-            }
-
-            // The chain key is generated with the chain's first batch, which
-            // is the one nothing has been shipped before, and deleted when
-            // the chain closes (§4.1). Missing on a chain that has already
-            // started means the chain was closed by a `session_end` and
-            // these frames were appended after it; §7 leaves them local.
-            let key = match read_chain_key(&key_path)? {
-                Some(key) => key,
-                None if shipped.is_none() => {
-                    let key = ChainKey::generate();
-                    write_private(&key_path, key.as_bytes())?;
-                    key
-                }
-                None => {
-                    return Err(
-                        "this chain is closed: its key was deleted after the session_end \
-                                the vault acknowledged, so these frames cannot ship to it"
-                            .into(),
-                    );
-                }
-            };
-            (shipped, pending, key)
+    let outcome = loop {
+        let Some(pending) = read_pending(log, &shipped_path, &key_path)? else {
+            break Outcome::Done;
         };
-
-        // §7 steps 4 and 5, with no lock held. A verification failure here
-        // is a local rewrite and stops the session.
-        verify_segment(log.session_id(), shipped.as_ref(), &pending)?;
-
-        let index = build_index(&pending)?;
-        let host = member(&pending, "host")
-            .ok_or("the first pending frame carries no host")?
-            .to_owned();
-
-        for (bytes, entries) in batches(&pending, &index) {
-            let last = &entries[entries.len() - 1];
-            let aad = BatchAad {
-                session_id: log.session_id().to_owned(),
-                host: host.clone(),
-                first_seq: entries[0].seq,
-                last_seq: last.seq,
-            };
-            let sealed = seal_batch(&key, &aad, bytes);
-            let body = serde_json::to_vec(&FramesRequest {
-                first_seq: aad.first_seq,
-                last_seq: aad.last_seq,
-                index: entries.to_vec(),
-                // The first batch of a chain carries the chain key, sealed
-                // to every pinned admin (§6 step 3).
-                wraps: (aad.first_seq == 0).then(|| wraps(&key, &machine.recipients)),
-                nonce: B64.encode(sealed.nonce),
-                ciphertext: B64.encode(&sealed.ciphertext),
-            })?;
-            let path = format!("/v1/chains/{}/{host}/frames", log.session_id());
-
-            let (status, answer) = match machine.send("POST", &path, body) {
-                Ok(answer) => answer,
-                Err(e) => {
-                    eprintln!("nd7 ship: {}: {e}", log.session_id());
-                    break 'resume Outcome::Unreachable;
-                }
-            };
-            match status {
-                // §7 step 6, the one write this needs the lock for.
-                200 => {
-                    let _lock = log.lock_exclusive()?;
-                    write_private(&shipped_path, shipped_line(last).as_bytes())?;
-                }
-                // §7 steps 7 and 8.
-                409 => {
-                    let conflict: ConflictResponse = serde_json::from_slice(&answer)?;
-                    let ours = conflict
-                        .expected_seq
-                        .checked_sub(1)
-                        .filter(|&seq| shipped.as_ref().is_none_or(|head| seq > head.seq))
-                        .and_then(|seq| index.iter().find(|entry| entry.seq == seq))
-                        .filter(|entry| entry.hash == conflict.head_hash);
-                    if let (false, Some(entry)) = (recovered, ours) {
-                        // An acknowledgement that never arrived: the vault
-                        // holds a frame of ours that `shipped` does not know
-                        // about. Catch `shipped` up and run the session
-                        // again, reading the directory afresh under the lock.
-                        recovered = true;
-                        {
-                            let _lock = log.lock_exclusive()?;
-                            write_private(&shipped_path, shipped_line(entry).as_bytes())?;
-                        }
-                        continue 'resume;
-                    }
-                    let seq = conflict.expected_seq.saturating_sub(1);
-                    let local = local_hash(&index, shipped.as_ref(), seq);
-                    eprintln!(
-                        "nd7 ship: {}: the chain diverges at seq {seq}: the vault holds {}, \
-                         this machine has {local}",
-                        log.session_id(),
-                        conflict.head_hash
-                    );
-                    break 'resume Outcome::Stopped;
-                }
-                // §7 step 8: an index that does not link up within itself.
-                422 => {
-                    let rejected: RejectResponse = serde_json::from_slice(&answer)?;
-                    eprintln!(
-                        "nd7 ship: {}: the vault rejected the batch at seq {}: {}",
-                        log.session_id(),
-                        rejected.seq,
-                        rejected.error
-                    );
-                    break 'resume Outcome::Stopped;
-                }
-                // §7 step 9, and anything else the vault says: the state on
-                // disk is untouched and the batch goes out again next run.
-                other => {
-                    eprintln!(
-                        "nd7 ship: {}: the vault answered {other}: {}",
-                        log.session_id(),
-                        text(&answer)
-                    );
-                    break 'resume Outcome::Unreachable;
-                }
-            }
+        match push(machine, log, &shipped_path, &pending, recover)? {
+            Some(outcome) => break outcome,
+            // An acknowledgement that never arrived: `shipped` has been
+            // caught up, so the directory is read afresh and this goes again.
+            None => recover = false,
         }
-        break Outcome::Done;
     };
 
-    if !matches!(outcome, Outcome::Done) {
-        return Ok(outcome);
+    if matches!(outcome, Outcome::Done) {
+        finish(log, &shipped_path, &key_path, prune_after)?;
+    }
+    Ok(outcome)
+}
+
+/// What one session has for the vault: §7 steps 2 and 3, and the chain key,
+/// all read under the exclusive lock. `None` when the vault already has
+/// everything the session holds.
+struct Pending {
+    /// The last frame the vault acknowledged, `None` for a chain it has never
+    /// seen.
+    shipped: Option<Head>,
+    /// The bytes of every frame after it.
+    frames: Vec<u8>,
+    key: ChainKey,
+}
+
+fn read_pending(log: &SessionLog, shipped_path: &Path, key_path: &Path) -> Result<Option<Pending>> {
+    let _lock = log.lock_exclusive()?;
+    // A session directory with no head has no frames to ship.
+    let Some(head) = log.read_head()? else {
+        return Ok(None);
+    };
+    let shipped = read_head(shipped_path)?;
+    if shipped.as_ref() == Some(&head) {
+        return Ok(None);
     }
 
-    // Closing the chain and pruning are local work, so they take the lock
-    // again. Whether the vault now has every frame has to be read again
-    // rather than assumed: a hook may have appended while a batch was in
-    // flight, and those frames are not shipped yet.
+    // The pending bytes, found by reading backwards from the end.
+    let frames = match &shipped {
+        None => fs::read(log.events_path())?,
+        Some(shipped) => log.read_after_seq(shipped.seq)?.ok_or_else(|| {
+            format!(
+                "the log no longer holds frame {}, the last one the vault acknowledged",
+                shipped.seq
+            )
+        })?,
+    };
+    // Nothing after the shipped frame although `head` is a different frame:
+    // the two sidecars disagree, which no batch can fix.
+    if frames.is_empty() {
+        return Err(format!(
+            "`shipped` and `head` name frame {} with different hashes",
+            head.seq
+        )
+        .into());
+    }
+
+    // The chain key is generated with the chain's first batch, which is the
+    // one nothing has been shipped before, and deleted when the chain closes
+    // (§4.1). Missing on a chain that has already started means the chain was
+    // closed by a `session_end` and these frames were appended after it; §7
+    // leaves them local.
+    let key = match read_chain_key(key_path)? {
+        Some(key) => key,
+        None if shipped.is_none() => {
+            let key = ChainKey::generate();
+            write_private(key_path, key.as_bytes())?;
+            key
+        }
+        None => {
+            return Err(
+                "this chain is closed: its key was deleted after the session_end \
+                        the vault acknowledged, so these frames cannot ship to it"
+                    .into(),
+            );
+        }
+    };
+    Ok(Some(Pending {
+        shipped,
+        frames,
+        key,
+    }))
+}
+
+/// Verify, encrypt and push the pending frames: §7 steps 4 to 9, with the
+/// lock held only for the `shipped` write of step 6.
+///
+/// `Ok(None)` asks the caller to run the session again: the vault answered
+/// `409` holding a frame of ours that `shipped` did not know about, and
+/// `shipped` has been caught up to it (§7 step 7). `recover` is false once
+/// that has happened, so a vault that keeps answering `409` stops the session
+/// instead of spinning.
+fn push(
+    machine: &Machine,
+    log: &SessionLog,
+    shipped_path: &Path,
+    pending: &Pending,
+    recover: bool,
+) -> Result<Option<Outcome>> {
+    // §7 steps 4 and 5, with no lock held. A verification failure here is a
+    // local rewrite and stops the session.
+    verify_segment(log.session_id(), pending.shipped.as_ref(), &pending.frames)?;
+
+    let index = build_index(&pending.frames)?;
+    let host = member(&pending.frames, "host")
+        .ok_or("the first pending frame carries no host")?
+        .to_owned();
+
+    for (bytes, entries) in batches(&pending.frames, &index) {
+        let last = &entries[entries.len() - 1];
+        let aad = BatchAad {
+            session_id: log.session_id().to_owned(),
+            host: host.clone(),
+            first_seq: entries[0].seq,
+            last_seq: last.seq,
+        };
+        let sealed = seal_batch(&pending.key, &aad, bytes);
+        let body = serde_json::to_vec(&FramesRequest {
+            first_seq: aad.first_seq,
+            last_seq: aad.last_seq,
+            index: entries.to_vec(),
+            // The first batch of a chain carries the chain key, sealed to
+            // every pinned admin (§6 step 3).
+            wraps: (aad.first_seq == 0).then(|| wraps(&pending.key, &machine.recipients)),
+            nonce: B64.encode(sealed.nonce),
+            ciphertext: B64.encode(&sealed.ciphertext),
+        })?;
+        let path = format!("/v1/chains/{}/{host}/frames", log.session_id());
+
+        let (status, answer) = match machine.send("POST", &path, body) {
+            Ok(answer) => answer,
+            Err(e) => {
+                eprintln!("nd7 ship: {}: {e}", log.session_id());
+                return Ok(Some(Outcome::Unreachable));
+            }
+        };
+        match status {
+            // §7 step 6, the one write this needs the lock for.
+            200 => {
+                let _lock = log.lock_exclusive()?;
+                write_private(shipped_path, shipped_line(last).as_bytes())?;
+            }
+            // §7 steps 7 and 8.
+            409 => {
+                let conflict: ConflictResponse = serde_json::from_slice(&answer)?;
+                let ours = conflict
+                    .expected_seq
+                    .checked_sub(1)
+                    .filter(|&seq| pending.shipped.as_ref().is_none_or(|head| seq > head.seq))
+                    .and_then(|seq| index.iter().find(|entry| entry.seq == seq))
+                    .filter(|entry| entry.hash == conflict.head_hash);
+                if let (true, Some(entry)) = (recover, ours) {
+                    let _lock = log.lock_exclusive()?;
+                    write_private(shipped_path, shipped_line(entry).as_bytes())?;
+                    return Ok(None);
+                }
+                let seq = conflict.expected_seq.saturating_sub(1);
+                let local = local_hash(&index, pending.shipped.as_ref(), seq);
+                eprintln!(
+                    "nd7 ship: {}: the chain diverges at seq {seq}: the vault holds {}, \
+                     this machine has {local}",
+                    log.session_id(),
+                    conflict.head_hash
+                );
+                return Ok(Some(Outcome::Stopped));
+            }
+            // §7 step 8: an index that does not link up within itself.
+            422 => {
+                let rejected: RejectResponse = serde_json::from_slice(&answer)?;
+                eprintln!(
+                    "nd7 ship: {}: the vault rejected the batch at seq {}: {}",
+                    log.session_id(),
+                    rejected.seq,
+                    rejected.error
+                );
+                return Ok(Some(Outcome::Stopped));
+            }
+            // §7 step 9, and anything else the vault says: the state on disk
+            // is untouched and the batch goes out again next run.
+            other => {
+                eprintln!(
+                    "nd7 ship: {}: the vault answered {other}: {}",
+                    log.session_id(),
+                    text(&answer)
+                );
+                return Ok(Some(Outcome::Unreachable));
+            }
+        }
+    }
+    Ok(Some(Outcome::Done))
+}
+
+/// Close the chain and prune the session, for a run that ended `Done` (§7
+/// steps 8 and 9).
+///
+/// Local work, so it takes the lock again. Whether the vault now has every
+/// frame has to be read again rather than assumed: a hook may have appended
+/// while a batch was in flight, and those frames are not shipped yet.
+fn finish(
+    log: &SessionLog,
+    shipped_path: &Path,
+    key_path: &Path,
+    prune_after: Option<Duration>,
+) -> Result<()> {
     let _lock = log.lock_exclusive()?;
-    let complete = read_shipped(&shipped_path)? == log.read_head()?;
-    let last = log.last_frame()?;
+    let complete = read_head(shipped_path)? == log.read_head()?;
+    let last = match log.last_frame()? {
+        Tail::Frame(frame) => Some(frame),
+        Tail::Empty => None,
+        Tail::Torn => return Err("the log ends mid-frame".into()),
+    };
 
     // A chain the vault holds all of, ending in a `session_end`, is closed:
     // the machine keeps no key for it (§7).
@@ -406,7 +446,12 @@ fn session(machine: &Machine, log: &SessionLog, prune_after: Option<Duration>) -
             .and_then(|frame| member(frame, "kind"))
             .is_some_and(|kind| kind == "session_end")
     {
-        remove_if_present(&key_path)?;
+        // Gone already if an earlier run deleted it.
+        if let Err(e) = fs::remove_file(key_path)
+            && e.kind() != io::ErrorKind::NotFound
+        {
+            return Err(e.into());
+        }
     }
 
     // Prune, when it is on: only a session the vault has every frame of,
@@ -423,7 +468,7 @@ fn session(machine: &Machine, log: &SessionLog, prune_after: Option<Duration>) -
     {
         fs::remove_dir_all(log.dir())?;
     }
-    Ok(outcome)
+    Ok(())
 }
 
 /// Split verified frame bytes into batches of at most [`MAX_BATCH`], never
@@ -478,16 +523,6 @@ fn shipped_line(entry: &IndexEntry) -> String {
     )
 }
 
-/// The last frame the vault acknowledged, parsed with [`Head`] because
-/// `shipped` and `head` hold the same two fields in the same format.
-fn read_shipped(path: &Path) -> Result<Option<Head>> {
-    match fs::read_to_string(path) {
-        Ok(s) => Ok(Some(s.parse()?)),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e.into()),
-    }
-}
-
 /// The chain key of an open chain, or `None` when the chain has none yet.
 fn read_chain_key(path: &Path) -> Result<Option<ChainKey>> {
     match fs::read(path) {
@@ -497,13 +532,6 @@ fn read_chain_key(path: &Path) -> Result<Option<ChainKey>> {
         }
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.into()),
-    }
-}
-
-fn remove_if_present(path: &Path) -> io::Result<()> {
-    match fs::remove_file(path) {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-        other => other,
     }
 }
 
@@ -527,6 +555,8 @@ impl Machine {
         })?;
         let seed: [u8; 32] = seed.try_into().map_err(|_| "machine.key is not 32 bytes")?;
         let server = fs::read_to_string(dir.join("server"))?.trim().to_owned();
+        // Checked once per run as well as per request, so a bad `server` file
+        // fails the run instead of being refused again on every `--every` tick.
         check_server(&server)?;
         Ok(Machine {
             id: fs::read_to_string(dir.join("machine.id"))?
@@ -682,15 +712,7 @@ fn member<'a>(frame: &'a [u8], name: &str) -> Option<&'a str> {
 
 /// A frame's `ts`: Unix epoch nanoseconds, read the same way.
 fn frame_ts(frame: &[u8]) -> Option<i64> {
-    const TS: &[u8] = br#","ts":"#;
-    let at = find(frame, TS)? + TS.len();
-    let rest = &frame[at..];
-    let end = rest.iter().position(|&b| b == b',')?;
-    std::str::from_utf8(&rest[..end]).ok()?.parse().ok()
-}
-
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).position(|w| w == needle)
+    number(frame, TS)?.parse().ok()
 }
 
 /// A response body in an error message: whatever of it is text, trimmed to

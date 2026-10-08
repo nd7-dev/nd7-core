@@ -202,7 +202,7 @@ fn regenerate_vectors() {
 
     let root = env::temp_dir().join(format!("nd7-vectors-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
-    let mut log = SessionLog::open_in(&root, SESSION_ID).unwrap();
+    let log = SessionLog::open_in(&root, SESSION_ID).unwrap();
     for (i, payload) in payloads.iter().enumerate() {
         let input: HookInput = payload.parse().unwrap();
         // Fixed, so the same payloads always produce the same frames.

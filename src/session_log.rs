@@ -67,18 +67,19 @@ impl SessionLog {
     }
 
     /// Whether this session has a directory on disk yet.
-    pub fn exists(&self) -> bool {
+    fn exists(&self) -> bool {
         self.dir.is_dir()
     }
+
     pub fn events_path(&self) -> PathBuf {
         self.dir.join("events.ndjson")
     }
 
-    pub fn lock_path(&self) -> PathBuf {
+    fn lock_path(&self) -> PathBuf {
         self.dir.join("lock")
     }
 
-    pub fn head_path(&self) -> PathBuf {
+    fn head_path(&self) -> PathBuf {
         self.dir.join("head")
     }
 
@@ -95,13 +96,25 @@ impl SessionLog {
     /// and `nd7 ship` for as long as it reads the log and rewrites `shipped`.
     /// Creates the lock file, but not the directory; `append` creates that.
     pub fn lock_exclusive(&self) -> io::Result<fs::File> {
-        let lock_file = fs::OpenOptions::new()
+        let lock_file = self.open_lock()?;
+        lock_file.lock()?;
+        Ok(lock_file)
+    }
+
+    /// The same lock, shared: readers never block each other, but no append
+    /// can land while one is held. [`SessionLog::verify`] takes it.
+    fn lock_shared(&self) -> io::Result<fs::File> {
+        let lock_file = self.open_lock()?;
+        lock_file.lock_shared()?;
+        Ok(lock_file)
+    }
+
+    fn open_lock(&self) -> io::Result<fs::File> {
+        fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
-            .open(self.lock_path())?;
-        lock_file.lock()?;
-        Ok(lock_file)
+            .open(self.lock_path())
     }
 
     /// Link the event to the chain, assign `seq`, and append it as one
@@ -110,7 +123,7 @@ impl SessionLog {
     /// `head` and the log's last frame are read and compared on every append.
     /// A benign disagreement repairs itself (see the module docs); anything
     /// else returns a [`ChainError`] having written nothing.
-    pub fn append(&mut self, mut event: Event) -> Result<()> {
+    pub fn append(&self, mut event: Event) -> Result<()> {
         // Idempotent and cheap; the only place that may create the session.
         fs::create_dir_all(&self.dir)?;
         let _lock = self.lock_exclusive()?;
@@ -118,20 +131,15 @@ impl SessionLog {
         // Both reads happen under the exclusive lock, so no other appender can
         // move the tail between them.
         let head = self.read_head()?;
-        let events_path = self.events_path();
-        let last = match read_last_line(&events_path) {
-            Ok(last) => last,
-            Err(e) if e.kind() == io::ErrorKind::InvalidData => {
-                // The one InvalidData `read_last_line` produces: the file does
-                // not end in a newline. Counting the complete frames costs a
-                // full read, affordable here because the append fails anyway.
-                let seq = fs::read(&events_path)?
-                    .iter()
-                    .filter(|&&b| b == b'\n')
-                    .count() as u64;
+        let last = match self.last_frame()? {
+            Tail::Frame(line) => Some(line),
+            Tail::Empty => None,
+            Tail::Torn => {
+                // Counting the complete frames costs a full read, affordable
+                // here because the append fails anyway.
+                let seq = complete_frames(&fs::read(self.events_path())?);
                 return Err(ChainError::TornTail { seq }.into());
             }
-            Err(e) => return Err(e.into()),
         };
         let (seq, prev) = self.next_link(head, last.as_deref())?;
         event.seq = seq;
@@ -169,16 +177,11 @@ impl SessionLog {
             let id = &self.session_id;
             return Err(ChainError::Io(format!("no such session: {id}")));
         }
-        let lock_file = fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(self.lock_path())?;
         // Shared, not exclusive: readers never block each other, but no
         // `append` can land between reading the log and reading `head`. Without
         // this, a frame written in that gap makes a healthy log look truncated
         // or stale. The walk itself needs no lock; only the pair of reads does.
-        lock_file.lock_shared()?;
+        let _lock = self.lock_shared()?;
 
         let bytes = match fs::read(self.events_path()) {
             Ok(b) => b,
@@ -204,22 +207,15 @@ impl SessionLog {
 
         let tail = verify_segment(&self.session_id, None, &bytes)?;
         let last_seq = tail.seq;
-        let frames = last_seq + 1;
         match self.read_head()? {
             None => Err(ChainError::HeadMissing { last_seq }),
-            Some(head) if head.seq < last_seq => Err(ChainError::HeadStale {
-                head_seq: head.seq,
-                last_seq,
-            }),
-            Some(head) if head.seq > last_seq => Err(ChainError::Truncated {
-                head_seq: head.seq,
-                last_seq,
-            }),
-            Some(head) if head.hash != tail.hash => Err(ChainError::HeadMismatch { seq: last_seq }),
-            Some(_) => Ok(Report {
-                frames,
-                last_hash: Some(tail.hash),
-            }),
+            Some(head) => {
+                head_agrees(&head, last_seq, &tail.hash)?;
+                Ok(Report {
+                    frames: last_seq + 1,
+                    last_hash: Some(tail.hash),
+                })
+            }
         }
     }
 
@@ -265,46 +261,44 @@ impl SessionLog {
             // REPAIR: frames but no head. The log is the authority for where
             // the chain is; the head this append writes restores the cache.
             None => next(last_hash),
-            // The ordinary case: the cache agrees with the log.
-            Some(head) if head.seq == last_seq && head.hash == last_hash => next(last_hash),
             // REPAIR: an append died between writing its frame and rewriting
             // `head`. The head names the frame before the last one, and the
             // last frame links to exactly that hash, so the chain is whole.
             Some(head) if last_seq.checked_sub(1) == Some(head.seq) && head.hash == last_prev => {
                 next(last_hash)
             }
-            Some(head) if head.seq < last_seq => Err(ChainError::HeadStale {
-                head_seq: head.seq,
-                last_seq,
-            }),
-            Some(head) if head.seq > last_seq => Err(ChainError::Truncated {
-                head_seq: head.seq,
-                last_seq,
-            }),
-            // Same seq, different hash: one of the two was rewritten.
-            Some(_) => Err(ChainError::HeadMismatch { seq: last_seq }),
+            // Anything else: the cache agrees with the log, or it is damage.
+            Some(head) => {
+                head_agrees(&head, last_seq, last_hash)?;
+                next(last_hash)
+            }
         }
     }
 
-    /// The chain head, or `None` for a session with no `head` file yet. An
-    /// unparseable head is a chain fault, not an I/O failure; either way it
-    /// must fail loudly rather than restart the chain.
+    /// The chain head, or `None` for a session with no `head` file yet.
     pub fn read_head(&self) -> std::result::Result<Option<Head>, ChainError> {
-        match fs::read_to_string(self.head_path()) {
-            Ok(s) => s
-                .parse()
-                .map(Some)
-                .map_err(|e: Box<dyn std::error::Error>| ChainError::HeadInvalid(e.to_string())),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e.into()),
-        }
+        read_head(&self.head_path())
     }
 
-    /// The log's last complete frame, without its trailing newline, or
-    /// `None` for a log that is missing or empty. One frame's worth of
-    /// reading, not one log's: it reads backwards from the end.
-    pub fn last_frame(&self) -> io::Result<Option<Vec<u8>>> {
-        read_last_line(&self.events_path())
+    /// The log's last complete frame, without its trailing newline. One
+    /// frame's worth of reading, not one log's: it reads backwards from the
+    /// end, so `append` does not grow with the session.
+    pub(crate) fn last_frame(&self) -> io::Result<Tail> {
+        let Some(mut back) = Backwards::open(&self.events_path())? else {
+            return Ok(Tail::Empty);
+        };
+        let len = back.len;
+        if len == 0 {
+            return Ok(Tail::Empty);
+        }
+        // One chunk is enough to see whether the file ends in a newline, and
+        // the last frame usually ends there too.
+        back.widen()?;
+        if !back.tail.ends_with(b"\n") {
+            return Ok(Tail::Torn);
+        }
+        let start = back.line_start(len)?;
+        Ok(Tail::Frame(back.slice(start, len - 1).to_vec()))
     }
 
     /// The bytes of every frame after the one whose `seq` is `seq`: the
@@ -322,51 +316,98 @@ impl SessionLog {
     /// are returned with the rest, so a torn tail reaches `verify_segment`
     /// instead of being hidden here.
     pub fn read_after_seq(&self, seq: u64) -> io::Result<Option<Vec<u8>>> {
-        const CHUNK: u64 = 64 * 1024;
+        let Some(mut back) = Backwards::open(&self.events_path())? else {
+            return Ok(None);
+        };
+        let len = back.len;
+        // The line under inspection is the one ending at `cut`.
+        let mut cut = len;
+        loop {
+            let start = back.line_start(cut)?;
+            if chain_fields(back.slice(start, cut)).is_some_and(|(found, _)| found == seq) {
+                return Ok(Some(back.slice(cut, len).to_vec()));
+            }
+            if start == 0 {
+                return Ok(None);
+            }
+            cut = start;
+        }
+    }
+}
 
-        let mut file = match fs::File::open(self.events_path()) {
+/// What the end of a log looks like.
+pub(crate) enum Tail {
+    /// The last complete frame, without its trailing newline.
+    Frame(Vec<u8>),
+    /// The log is missing or holds no bytes.
+    Empty,
+    /// The file does not end in a newline: the last write was cut short. The
+    /// `seq` is not reported here because it costs a full read of the file.
+    Torn,
+}
+
+/// A file read from its end towards its start, one chunk at a time, so that
+/// finding the last frame or the pending region costs one frame rather than
+/// one log.
+struct Backwards {
+    file: fs::File,
+    len: u64,
+    /// The bytes from `start` to the end of the file.
+    tail: Vec<u8>,
+    start: u64,
+}
+
+impl Backwards {
+    const CHUNK: u64 = 64 * 1024;
+
+    /// `None` for a file that is not there.
+    fn open(path: &Path) -> io::Result<Option<Backwards>> {
+        let mut file = match fs::File::open(path) {
             Ok(f) => f,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e),
         };
         let len = file.seek(SeekFrom::End(0))?;
+        Ok(Some(Backwards {
+            file,
+            len,
+            tail: Vec::new(),
+            start: len,
+        }))
+    }
 
-        // `tail` holds the bytes from `start` to the end of the file, and the
-        // line under inspection is the one ending at `cut`.
-        let mut tail: Vec<u8> = Vec::new();
-        let mut start = len;
-        let mut cut = len;
+    /// Pull one more chunk of the file into `tail`.
+    fn widen(&mut self) -> io::Result<()> {
+        let chunk_start = self.start.saturating_sub(Self::CHUNK);
+        let mut buf = vec![0u8; (self.start - chunk_start) as usize];
+        self.file.seek(SeekFrom::Start(chunk_start))?;
+        self.file.read_exact(&mut buf)?;
+        buf.append(&mut self.tail);
+        self.tail = buf;
+        self.start = chunk_start;
+        Ok(())
+    }
+
+    /// Where the line ending at `cut` begins, reading further chunks until the
+    /// newline before it is in `tail` or the file runs out.
+    fn line_start(&mut self, cut: u64) -> io::Result<u64> {
         loop {
-            // This line begins after the newline before `cut - 1`; the byte
-            // at `cut - 1` is this line's own terminator, so it is left out
-            // of the search. Reading more of the file is what makes the
-            // search widen.
-            let line_start = loop {
-                let searched = &tail[..cut.saturating_sub(1).saturating_sub(start) as usize];
-                if let Some(i) = searched.iter().rposition(|&b| b == b'\n') {
-                    break start + i as u64 + 1;
-                }
-                if start == 0 {
-                    break 0;
-                }
-                let chunk_start = start.saturating_sub(CHUNK);
-                let mut buf = vec![0u8; (start - chunk_start) as usize];
-                file.seek(SeekFrom::Start(chunk_start))?;
-                file.read_exact(&mut buf)?;
-                buf.append(&mut tail);
-                tail = buf;
-                start = chunk_start;
-            };
-
-            let line = &tail[(line_start - start) as usize..(cut - start) as usize];
-            if chain_fields(line).is_some_and(|(found, _)| found == seq) {
-                return Ok(Some(tail[(cut - start) as usize..].to_vec()));
+            // The byte at `cut - 1` is this line's own terminator, so it is
+            // left out of the search.
+            let searched = &self.tail[..cut.saturating_sub(1).saturating_sub(self.start) as usize];
+            if let Some(i) = searched.iter().rposition(|&b| b == b'\n') {
+                return Ok(self.start + i as u64 + 1);
             }
-            if line_start == 0 {
-                return Ok(None);
+            if self.start == 0 {
+                return Ok(0);
             }
-            cut = line_start;
+            self.widen()?;
         }
+    }
+
+    /// The bytes between two file offsets, both of which `tail` must cover.
+    fn slice(&self, from: u64, to: u64) -> &[u8] {
+        &self.tail[(from - self.start) as usize..(to - self.start) as usize]
     }
 }
 
@@ -406,9 +447,8 @@ pub fn verify_segment(
     // Checked before the walk: a frame cut short still hashes cleanly, since
     // the hash never covered the trailing newline.
     if !frames.ends_with(b"\n") {
-        let complete = frames.iter().filter(|&&b| b == b'\n').count() as u64;
         return Err(ChainError::TornTail {
-            seq: first_seq + complete,
+            seq: first_seq + complete_frames(frames),
         });
     }
 
@@ -429,58 +469,50 @@ pub fn verify_segment(
     })
 }
 
-/// The last complete line of `path`, without its trailing newline.
+/// The `<seq> <hash>` sidecar at `path`, or `None` when the file is not there.
+/// An unparseable one is a chain fault, not an I/O failure; either way it must
+/// fail loudly rather than restart the chain.
 ///
-/// Seeks to the end and reads backwards in 64 KiB chunks until it finds the
-/// newline before the final one, so the cost is one frame rather than one log:
-/// `append` must not grow with the session. `None` for a missing or empty file.
-///
-/// A non-empty file that does not end in a newline is a torn tail, and is the
-/// only [`io::ErrorKind::InvalidData`] this returns; the caller turns it into
-/// [`ChainError::TornTail`]. The `seq` is not computed here because it costs a
-/// full read of the file.
-fn read_last_line(path: &Path) -> io::Result<Option<Vec<u8>>> {
-    const CHUNK: u64 = 64 * 1024;
-
-    let mut file = match fs::File::open(path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e),
-    };
-    let len = file.seek(SeekFrom::End(0))?;
-    if len == 0 {
-        return Ok(None);
+/// `nd7 ship` reads `shipped` with this too: it holds the same two fields in
+/// the same format as `head`.
+pub(crate) fn read_head(path: &Path) -> std::result::Result<Option<Head>, ChainError> {
+    match fs::read_to_string(path) {
+        Ok(s) => s
+            .parse()
+            .map(Some)
+            .map_err(|e: Box<dyn std::error::Error>| ChainError::HeadInvalid(e.to_string())),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
     }
+}
 
-    // `tail` always holds the bytes from `start` to the end of the file, and
-    // always ends in the file's final newline once the first chunk is checked.
-    let mut tail: Vec<u8> = Vec::new();
-    let mut start = len;
-    loop {
-        let chunk_start = start.saturating_sub(CHUNK);
-        let mut buf = vec![0u8; (start - chunk_start) as usize];
-        file.seek(SeekFrom::Start(chunk_start))?;
-        file.read_exact(&mut buf)?;
-        buf.append(&mut tail);
-        tail = buf;
-        start = chunk_start;
-
-        if !tail.ends_with(b"\n") {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "log does not end in a newline",
-            ));
-        }
-        // The newline before the last one bounds the final line; without one,
-        // the whole file is a single line.
-        let body = &tail[..tail.len() - 1];
-        if let Some(i) = body.iter().rposition(|&b| b == b'\n') {
-            return Ok(Some(body[i + 1..].to_vec()));
-        }
-        if start == 0 {
-            return Ok(Some(body.to_vec()));
-        }
+/// Whether `head` still names the log's last frame. The three ways it can be
+/// wrong are the same for [`SessionLog::verify`] and for an append, so they
+/// are decided once; a missing head is not among them, because `verify` calls
+/// that missing and an append repairs it.
+fn head_agrees(head: &Head, last_seq: u64, last_hash: &str) -> std::result::Result<(), ChainError> {
+    if head.seq < last_seq {
+        return Err(ChainError::HeadStale {
+            head_seq: head.seq,
+            last_seq,
+        });
     }
+    if head.seq > last_seq {
+        return Err(ChainError::Truncated {
+            head_seq: head.seq,
+            last_seq,
+        });
+    }
+    // Same seq, different hash: one of the two was rewritten.
+    if head.hash != last_hash {
+        return Err(ChainError::HeadMismatch { seq: last_seq });
+    }
+    Ok(())
+}
+
+/// How many complete frames bytes that end mid-frame hold: one per newline.
+pub(crate) fn complete_frames(bytes: &[u8]) -> u64 {
+    bytes.iter().filter(|&&b| b == b'\n').count() as u64
 }
 
 /// Check one frame in isolation. Pure: depends only on this line's bytes and
@@ -515,37 +547,49 @@ fn check_frame<'a>(
     Ok(embedded)
 }
 
-/// The two chain fields, read straight out of a frame's bytes, without a JSON
-/// parse. `None` if either field is not where the writer puts it.
+/// The envelope members read straight out of a frame's bytes, as the byte
+/// sequences to search for.
 ///
 /// Why searching bytes is sound rather than a guess at the layout: JSON escapes
-/// a `"` inside a string value as `\"`, so the byte sequences `,"seq":` and
-/// `,"prev":"` cannot occur inside a value, and the first occurrence of each in
-/// a line is therefore the envelope member of that name. Callers run this after
-/// the hash check, so the bytes are already known to be exactly what the writer
-/// produced -- a frame someone hand-edited into a different shape fails earlier,
-/// not here.
+/// a `"` inside a string value as `\"`, so none of these sequences can occur
+/// inside a value, and the writer puts the whole envelope before `body`, so the
+/// first occurrence of each in a line is the envelope's own member. That holds
+/// for any line the writer produced, whether or not its hash has been checked
+/// yet.
+pub(crate) const SEQ: &[u8] = br#","seq":"#;
+pub(crate) const TS: &[u8] = br#","ts":"#;
+pub(crate) const PREV: &[u8] = br#","prev":""#;
+
+/// The two chain fields of a frame. `None` if either is not where the writer
+/// puts it.
 fn chain_fields(line: &[u8]) -> Option<(u64, &str)> {
-    const SEQ: &[u8] = br#","seq":"#;
-    const PREV: &[u8] = br#","prev":""#;
+    Some((number(line, SEQ)?.parse().ok()?, hex64(line, PREV)?))
+}
 
-    let at = find(line, SEQ)? + SEQ.len();
-    let digits = &line[at..];
-    let end = digits.iter().position(|&b| b == b',')?;
-    let seq: u64 = std::str::from_utf8(&digits[..end]).ok()?.parse().ok()?;
+/// The digits of a numeric envelope member: everything between `member` and
+/// the `,` that ends it.
+pub(crate) fn number<'a>(line: &'a [u8], member: &[u8]) -> Option<&'a str> {
+    let at = find(line, member)? + member.len();
+    let rest = &line[at..];
+    let end = rest.iter().position(|&b| b == b',')?;
+    std::str::from_utf8(&rest[..end]).ok()
+}
 
-    let at = find(line, PREV)? + PREV.len();
-    let prev = line.get(at..at.checked_add(64)?)?;
-    if !prev.iter().all(u8::is_ascii_hexdigit) || line.get(at + 64) != Some(&b'"') {
+/// The 64 hex digits of a hash-valued envelope member, checked to be hex and
+/// to be closed by the quote the writer puts there.
+pub(crate) fn hex64<'a>(line: &'a [u8], member: &[u8]) -> Option<&'a str> {
+    let at = find(line, member)? + member.len();
+    let value = line.get(at..at.checked_add(64)?)?;
+    if !value.iter().all(u8::is_ascii_hexdigit) || line.get(at + 64) != Some(&b'"') {
         return None;
     }
-    // Hex digits, so this is ASCII and the conversion cannot fail.
-    Some((seq, std::str::from_utf8(prev).ok()?))
+    // Hex digits, so this is ASCII.
+    Some(std::str::from_utf8(value).expect("64 ascii hex digits"))
 }
 
 /// Index of the first occurrence of `needle` in `haystack`. `needle` is always
 /// a short constant here, so the naive scan is the right one.
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+pub(crate) fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
@@ -704,26 +748,23 @@ pub fn state_root() -> Result<PathBuf> {
     Ok(state_home.join("nd7"))
 }
 
+/// A temporary state root and a frame to put in it: what every test that
+/// needs a real session log starts from, here and in [`crate::vault::index`].
 #[cfg(test)]
-mod tests {
-    use std::{
-        collections::BTreeSet,
-        sync::atomic::{AtomicU32, Ordering},
-        thread,
-        time::Instant,
-    };
+pub(crate) mod test_support {
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     use super::*;
     use crate::hook::{HookInput, Invocation};
 
     /// A fresh directory under the OS temp dir, removed on drop.
-    struct TempRoot(PathBuf);
+    pub(crate) struct TempRoot(pub(crate) PathBuf);
 
     impl TempRoot {
-        fn new() -> TempRoot {
+        pub(crate) fn new() -> TempRoot {
             static N: AtomicU32 = AtomicU32::new(0);
             let n = N.fetch_add(1, Ordering::Relaxed);
-            let dir = env::temp_dir().join(format!("nd7-writer-test-{}-{n}", std::process::id()));
+            let dir = env::temp_dir().join(format!("nd7-log-test-{}-{n}", std::process::id()));
             fs::create_dir_all(&dir).unwrap();
             TempRoot(dir)
         }
@@ -735,7 +776,7 @@ mod tests {
         }
     }
 
-    fn event(session: &str, prompt: &str) -> Event {
+    pub(crate) fn event(session: &str, prompt: &str) -> Event {
         let raw = format!(
             r#"{{"session_id": "{session}", "transcript_path": "/t", "cwd": "/p",
                  "hook_event_name": "UserPromptSubmit", "prompt": "{prompt}"}}"#
@@ -750,13 +791,23 @@ mod tests {
             },
         )
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::BTreeSet, thread, time::Instant};
+
+    use super::{
+        test_support::{TempRoot, event},
+        *,
+    };
 
     #[test]
     fn read_after_seq_finds_a_frame_several_chunks_back() {
         // Enough frames that the log is past the 64 KiB the backwards read
         // takes at a time, so the search crosses chunk boundaries.
         let root = TempRoot::new();
-        let mut log = SessionLog::open_in(&root.0, "back").unwrap();
+        let log = SessionLog::open_in(&root.0, "back").unwrap();
         for i in 0..800 {
             log.append(event("back", &format!("frame {i}"))).unwrap();
         }
@@ -784,7 +835,7 @@ mod tests {
     #[test]
     fn append_assigns_dense_seq_and_creates_files() {
         let root = TempRoot::new();
-        let mut log = SessionLog::open_in(&root.0, "s1").unwrap();
+        let log = SessionLog::open_in(&root.0, "s1").unwrap();
         log.append(event("s1", "one")).unwrap();
         log.append(event("s1", "two")).unwrap();
 
@@ -793,7 +844,7 @@ mod tests {
         assert_eq!(read_seqs(&log.events_path()), vec![0, 1]);
 
         // A second handle on the same session continues the sequence.
-        let mut again = SessionLog::open_in(&root.0, "s1").unwrap();
+        let again = SessionLog::open_in(&root.0, "s1").unwrap();
         again.append(event("s1", "three")).unwrap();
         assert_eq!(read_seqs(&log.events_path()), vec![0, 1, 2]);
     }
@@ -801,7 +852,7 @@ mod tests {
     #[test]
     fn frames_form_a_chain_anchored_to_the_session() {
         let root = TempRoot::new();
-        let mut log = SessionLog::open_in(&root.0, "chain").unwrap();
+        let log = SessionLog::open_in(&root.0, "chain").unwrap();
         for i in 0..3 {
             log.append(event("chain", &i.to_string())).unwrap();
         }
@@ -855,8 +906,8 @@ mod tests {
     #[test]
     fn sessions_do_not_share_a_sequence() {
         let root = TempRoot::new();
-        let mut a = SessionLog::open_in(&root.0, "a").unwrap();
-        let mut b = SessionLog::open_in(&root.0, "b").unwrap();
+        let a = SessionLog::open_in(&root.0, "a").unwrap();
+        let b = SessionLog::open_in(&root.0, "b").unwrap();
         a.append(event("a", "x")).unwrap();
         a.append(event("a", "y")).unwrap();
         b.append(event("b", "z")).unwrap();
@@ -883,7 +934,7 @@ mod tests {
             .map(|t| {
                 let root = root.0.clone();
                 thread::spawn(move || {
-                    let mut log = SessionLog::open_in(&root, "par").unwrap();
+                    let log = SessionLog::open_in(&root, "par").unwrap();
                     for i in 0..PER_THREAD {
                         log.append(event("par", &format!("{t}-{i}"))).unwrap();
                     }
@@ -905,7 +956,7 @@ mod tests {
 
     /// A three-frame session, ready to be tampered with.
     fn chain_of_three(root: &TempRoot, id: &str) -> SessionLog {
-        let mut log = SessionLog::open_in(&root.0, id).unwrap();
+        let log = SessionLog::open_in(&root.0, id).unwrap();
         for i in 0..3 {
             log.append(event(id, &format!("frame {i}"))).unwrap();
         }
@@ -1114,18 +1165,18 @@ mod tests {
     }
 
     /// The `ChainError` an append refused with.
-    fn refusal(e: Box<dyn std::error::Error>) -> ChainError {
+    fn refusal(e: &(dyn std::error::Error + 'static)) -> ChainError {
         e.downcast_ref::<ChainError>()
             .unwrap_or_else(|| panic!("expected a ChainError, got {e}"))
             .clone()
     }
 
     /// Append onto `log` and assert the refusal left both files alone.
-    fn assert_refuses(log: &mut SessionLog, id: &str, want: ChainError) {
+    fn assert_refuses(log: &SessionLog, id: &str, want: ChainError) {
         let events = fs::read(log.events_path()).unwrap();
         let head = fs::read(log.head_path()).unwrap();
         let err = log.append(event(id, "after")).unwrap_err();
-        assert_eq!(refusal(err), want);
+        assert_eq!(refusal(err.as_ref()), want);
         assert_eq!(fs::read(log.events_path()).unwrap(), events, "log changed");
         assert_eq!(fs::read(log.head_path()).unwrap(), head, "head changed");
     }
@@ -1152,7 +1203,7 @@ mod tests {
     #[test]
     fn append_repairs_a_missing_head() {
         let root = TempRoot::new();
-        let mut log = chain_of_three(&root, "headless");
+        let log = chain_of_three(&root, "headless");
         fs::remove_file(log.head_path()).unwrap();
 
         log.append(event("headless", "four")).unwrap();
@@ -1164,7 +1215,7 @@ mod tests {
     #[test]
     fn append_repairs_a_head_one_frame_behind() {
         let root = TempRoot::new();
-        let mut log = chain_of_three(&root, "behind");
+        let log = chain_of_three(&root, "behind");
         // Exactly what a crash between the frame write and the head write
         // leaves: head names frame 1, the log ends at frame 2.
         let lines = lines_of(&log);
@@ -1178,11 +1229,11 @@ mod tests {
     #[test]
     fn append_refuses_a_head_two_frames_behind() {
         let root = TempRoot::new();
-        let mut log = chain_of_three(&root, "far-behind");
+        let log = chain_of_three(&root, "far-behind");
         let lines = lines_of(&log);
         fs::write(log.head_path(), format!("0 {}\n", hash_of(&lines[0]))).unwrap();
         assert_refuses(
-            &mut log,
+            &log,
             "far-behind",
             ChainError::HeadStale {
                 head_seq: 0,
@@ -1194,11 +1245,11 @@ mod tests {
     #[test]
     fn append_refuses_a_head_ahead_of_the_log() {
         let root = TempRoot::new();
-        let mut log = chain_of_three(&root, "ahead");
+        let log = chain_of_three(&root, "ahead");
         let lines = lines_of(&log);
         fs::write(log.head_path(), format!("5 {}\n", hash_of(&lines[2]))).unwrap();
         assert_refuses(
-            &mut log,
+            &log,
             "ahead",
             ChainError::Truncated {
                 head_seq: 5,
@@ -1210,25 +1261,25 @@ mod tests {
     #[test]
     fn append_refuses_a_head_that_disagrees_on_the_hash() {
         let root = TempRoot::new();
-        let mut log = chain_of_three(&root, "disagree");
+        let log = chain_of_three(&root, "disagree");
         fs::write(log.head_path(), format!("2 {}\n", "0".repeat(64))).unwrap();
-        assert_refuses(&mut log, "disagree", ChainError::HeadMismatch { seq: 2 });
+        assert_refuses(&log, "disagree", ChainError::HeadMismatch { seq: 2 });
     }
 
     #[test]
     fn append_refuses_a_torn_tail() {
         let root = TempRoot::new();
-        let mut log = chain_of_three(&root, "torn-append");
+        let log = chain_of_three(&root, "torn-append");
         let mut bytes = fs::read(log.events_path()).unwrap();
         bytes.pop(); // the final newline
         fs::write(log.events_path(), bytes).unwrap();
-        assert_refuses(&mut log, "torn-append", ChainError::TornTail { seq: 2 });
+        assert_refuses(&log, "torn-append", ChainError::TornTail { seq: 2 });
     }
 
     #[test]
     fn append_finds_a_last_line_longer_than_a_read_chunk() {
         let root = TempRoot::new();
-        let mut log = SessionLog::open_in(&root.0, "chunky").unwrap();
+        let log = SessionLog::open_in(&root.0, "chunky").unwrap();
         log.append(event("chunky", "small")).unwrap();
         // Last frame well past the 64 KiB the tail read takes at a time, so
         // finding its start needs several passes.
@@ -1249,7 +1300,7 @@ mod tests {
     fn bench_verify_50k() {
         const FRAMES: u64 = 50_000;
         let root = TempRoot::new();
-        let mut log = SessionLog::open_in(&root.0, "bench").unwrap();
+        let log = SessionLog::open_in(&root.0, "bench").unwrap();
         // ~1.5 KB per frame once the envelope and the body are around it.
         let filler = "x".repeat(1_135);
         let built = Instant::now();

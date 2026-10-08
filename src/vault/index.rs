@@ -6,12 +6,13 @@
 //! [`build_index`] is the machine's side of the same contract: it reads the
 //! four index fields straight out of the frames it is about to encrypt.
 //!
-//! Both functions are pure, which is the point: the machine, the vault and
-//! the admin's CLI all run them over the same values and must agree.
+//! Both functions are pure, which is the point: [`build_index`] runs on the
+//! machine and [`verify_linkage`] in the vault, over the same values, and the
+//! two have to agree about what links up.
 
 use crate::{
     hook::event::{genesis_prev, split_sealed},
-    session_log::{ChainError, Head},
+    session_log::{ChainError, Head, PREV, SEQ, TS, complete_frames, hex64, number},
     vault::wire::IndexEntry,
 };
 
@@ -40,8 +41,9 @@ pub fn build_index(frames: &[u8]) -> Result<Vec<IndexEntry>, ChainError> {
         return Ok(Vec::new());
     }
     if !frames.ends_with(b"\n") {
-        let complete = frames.iter().filter(|&&b| b == b'\n').count() as u64;
-        return Err(ChainError::TornTail { seq: complete });
+        return Err(ChainError::TornTail {
+            seq: complete_frames(frames),
+        });
     }
     frames[..frames.len() - 1]
         .split(|&b| b == b'\n')
@@ -53,10 +55,6 @@ pub fn build_index(frames: &[u8]) -> Result<Vec<IndexEntry>, ChainError> {
 /// One frame's index entry, or `None` if any of the four fields is not where
 /// the writer puts it.
 fn entry(line: &[u8]) -> Option<IndexEntry> {
-    const SEQ: &[u8] = br#","seq":"#;
-    const TS: &[u8] = br#","ts":"#;
-    const PREV: &[u8] = br#","prev":""#;
-
     let (_, hash) = split_sealed(line)?;
     Some(IndexEntry {
         seq: number(line, SEQ)?.parse().ok()?,
@@ -64,33 +62,6 @@ fn entry(line: &[u8]) -> Option<IndexEntry> {
         hash: hash.to_owned(),
         ts: number(line, TS)?.parse().ok()?,
     })
-}
-
-/// The digits of a numeric envelope member: everything between `member` and
-/// the `,` that ends it.
-fn number<'a>(line: &'a [u8], member: &[u8]) -> Option<&'a str> {
-    let at = find(line, member)? + member.len();
-    let rest = &line[at..];
-    let end = rest.iter().position(|&b| b == b',')?;
-    std::str::from_utf8(&rest[..end]).ok()
-}
-
-/// The 64 hex digits of a hash-valued envelope member, checked to be hex and
-/// to be closed by the quote the writer puts there.
-fn hex64<'a>(line: &'a [u8], member: &[u8]) -> Option<&'a str> {
-    let at = find(line, member)? + member.len();
-    let value = line.get(at..at.checked_add(64)?)?;
-    if !value.iter().all(u8::is_ascii_hexdigit) || line.get(at + 64) != Some(&b'"') {
-        return None;
-    }
-    // Hex digits, so this is ASCII and the conversion cannot fail.
-    std::str::from_utf8(value).ok()
-}
-
-/// Index of the first occurrence of `needle` in `haystack`. `needle` is
-/// always a short constant here, so the naive scan is the right one.
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 /// What is wrong with an index, and where. Small on purpose: the vault can
@@ -190,56 +161,20 @@ pub fn verify_linkage(
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        env, fs,
-        path::PathBuf,
-        sync::atomic::{AtomicU32, Ordering},
-    };
+    use std::fs;
 
     use super::*;
     use crate::{
-        hook::{Event, HookInput, Invocation},
-        session_log::SessionLog,
+        hook::Event,
+        session_log::{
+            SessionLog,
+            test_support::{TempRoot, event},
+        },
     };
-
-    /// A fresh directory under the OS temp dir, removed on drop.
-    struct TempRoot(PathBuf);
-
-    impl TempRoot {
-        fn new() -> TempRoot {
-            static N: AtomicU32 = AtomicU32::new(0);
-            let n = N.fetch_add(1, Ordering::Relaxed);
-            let dir = env::temp_dir().join(format!("nd7-index-test-{}-{n}", std::process::id()));
-            fs::create_dir_all(&dir).unwrap();
-            TempRoot(dir)
-        }
-    }
-
-    impl Drop for TempRoot {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn event(session: &str, prompt: &str) -> Event {
-        let raw = format!(
-            r#"{{"session_id": "{session}", "transcript_path": "/t", "cwd": "/p",
-                 "hook_event_name": "UserPromptSubmit", "prompt": "{prompt}"}}"#
-        );
-        let input: HookInput = raw.parse().unwrap();
-        Event::new(
-            input,
-            Invocation {
-                ts: 1,
-                host: "test".into(),
-                hook_ppid: 1,
-            },
-        )
-    }
 
     /// A real session of `frames` frames, and the bytes the writer produced.
     fn recorded(root: &TempRoot, id: &str, frames: u64) -> Vec<u8> {
-        let mut log = SessionLog::open_in(&root.0, id).unwrap();
+        let log = SessionLog::open_in(&root.0, id).unwrap();
         for i in 0..frames {
             log.append(event(id, &format!("frame {i}"))).unwrap();
         }
