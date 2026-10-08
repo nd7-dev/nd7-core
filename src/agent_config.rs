@@ -98,7 +98,15 @@ const RECORD_TAIL: &str = "nd7 record";
 /// missing file is created, everything already in it is kept, and a hook nd7
 /// already has there is not added twice.
 pub fn install_claude(settings: &Path, nd7: &Path) -> io::Result<Changed> {
-    let mut root = read_object(settings)?;
+    let mut root = match read_json(settings)? {
+        Value::Object(map) => map,
+        other => {
+            return Err(io::Error::other(format!(
+                "{}: expected a JSON object, got {other}",
+                settings.display()
+            )));
+        }
+    };
     let hooks = match root
         .entry("hooks")
         .or_insert_with(|| Value::Object(Map::new()))
@@ -175,11 +183,15 @@ pub fn claude_has_hook(settings: &Path, nd7: &Path) -> bool {
 pub fn install_codex(config: &Path, nd7: &Path) -> io::Result<Changed> {
     let text = read_or_empty(config)?;
     let nd7 = nd7.display();
+    let there = codex_hook_tables(&text);
+    let installed_for = |event: &str, tail: &str| {
+        there
+            .iter()
+            .any(|hook| hook.event == event && hook.command.ends_with(tail))
+    };
     let mut add = String::new();
 
-    if !codex_command(&text, "PreToolUse", |command| {
-        command.ends_with(PREFIX_TAIL)
-    }) {
+    if !installed_for("PreToolUse", PREFIX_TAIL) {
         add.push_str(&format!(
             "\n# nd7: routes every Bash command through nd7-exec. Installed by `nd7 init`.\n\
              [[hooks.PreToolUse]]\n\
@@ -197,7 +209,7 @@ pub fn install_codex(config: &Path, nd7: &Path) -> io::Result<Changed> {
     // unchanged.
     let record = toml_string(&format!("{nd7} record"));
     for event in CODEX_RECORD_EVENTS {
-        if codex_command(&text, event, |command| command.ends_with(RECORD_TAIL)) {
+        if installed_for(event, RECORD_TAIL) {
             continue;
         }
         let timeout = if event == "SessionEnd" {
@@ -216,20 +228,47 @@ pub fn install_codex(config: &Path, nd7: &Path) -> io::Result<Changed> {
         ));
     }
 
-    // Codex asks the user to approve every hook it discovers, and records the
-    // approval as a hash of the hook under `[hooks.state]`. It records it by
-    // rewriting this file, which `nd7 run` makes unwritable, so the approval
-    // could never be given from a session nd7 started; nd7 writes it here for
-    // the hooks it installed itself, and for no others.
-    let mut installed = text.clone();
-    if !installed.is_empty() && !installed.ends_with('\n') {
-        installed.push('\n');
+    // A table header must start a line, whatever the file ended with.
+    let pad = if text.is_empty() || text.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    add.push_str(&codex_trust_entries(
+        config,
+        &format!("{nd7} "),
+        &format!("{text}{pad}{add}"),
+    ));
+
+    if add.is_empty() {
+        return Ok(Changed::AlreadyInstalled);
     }
-    installed.push_str(&add);
-    let trusted = codex_trust_keys_present(&installed);
-    let ours = format!("{nd7} ");
-    for hook in codex_hook_tables(&installed) {
-        if !hook.command.starts_with(&ours) {
+    if let Some(dir) = config.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(config)?;
+    file.write_all(pad.as_bytes())?;
+    file.write_all(add.as_bytes())?;
+    Ok(Changed::Installed)
+}
+
+/// The `[hooks.state]` tables to append so that every nd7 hook in `text` is
+/// one Codex already has an approval for. `ours` is the command prefix that
+/// marks a hook as nd7's: the binary's path and a space.
+///
+/// Codex asks the user to approve every hook it discovers, and records the
+/// approval as a hash of the hook under `[hooks.state]`. It records it by
+/// rewriting `config.toml`, which `nd7 run` makes unwritable, so the approval
+/// could never be given from a session nd7 started; `nd7 init` writes it for
+/// the hooks it installed itself, and for no others.
+fn codex_trust_entries(config: &Path, ours: &str, text: &str) -> String {
+    let trusted = codex_trust_keys_present(text);
+    let mut add = String::new();
+    for hook in codex_hook_tables(text) {
+        if !hook.command.starts_with(ours) {
             continue;
         }
         let key = codex_trust_key(config, &hook);
@@ -249,23 +288,7 @@ pub fn install_codex(config: &Path, nd7: &Path) -> io::Result<Changed> {
             ),
         ));
     }
-
-    if add.is_empty() {
-        return Ok(Changed::AlreadyInstalled);
-    }
-    if let Some(dir) = config.parent() {
-        fs::create_dir_all(dir)?;
-    }
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(config)?;
-    // A table header must start a line, whatever the file ended with.
-    if !text.is_empty() && !text.ends_with('\n') {
-        file.write_all(b"\n")?;
-    }
-    file.write_all(add.as_bytes())?;
-    Ok(Changed::Installed)
+    add
 }
 
 /// Whether `config` already runs *this* nd7 as its `PreToolUse` hook. As for
@@ -275,7 +298,9 @@ pub fn codex_has_hook(config: &Path, nd7: &Path) -> bool {
     let Ok(text) = fs::read_to_string(config) else {
         return false;
     };
-    codex_command(&text, "PreToolUse", |command| command == want)
+    codex_hook_tables(&text)
+        .iter()
+        .any(|hook| hook.event == "PreToolUse" && hook.command == want)
 }
 
 /// Whether every nd7 hook in a Codex config is one Codex has a `trusted_hash`
@@ -311,7 +336,7 @@ pub fn codex_hooks_trusted(config: &Path, nd7: &Path) -> bool {
 /// `matcher` line at all — printed compactly with its keys sorted. `event` is
 /// the CamelCase name; `timeout` is the effective one, in seconds. Reproduced
 /// against the hashes Codex 0.155.1 wrote for all seven of nd7's hooks.
-pub fn codex_trust_hash(event: &str, matcher: Option<&str>, command: &str, timeout: u64) -> String {
+fn codex_trust_hash(event: &str, matcher: Option<&str>, command: &str, timeout: u64) -> String {
     // serde_json's map is a `BTreeMap` here, so this prints sorted already.
     let mut hook = json!({
         "event_name": codex_event_label(event),
@@ -331,7 +356,7 @@ pub fn codex_trust_hash(event: &str, matcher: Option<&str>, command: &str, timeo
 /// The keys of the `[hooks.state."…"]` tables in `text` that carry a
 /// `trusted_hash`. A key is `<config path>:<event label>:<group>:<handler>`,
 /// the path spelled as Codex opened the file.
-pub fn codex_trust_keys_present(text: &str) -> BTreeSet<String> {
+fn codex_trust_keys_present(text: &str) -> BTreeSet<String> {
     let mut keys = BTreeSet::new();
     let mut key = None;
     for line in text.lines() {
@@ -395,9 +420,6 @@ struct CodexHook {
 /// line is hashed with.
 const CODEX_DEFAULT_TIMEOUT: u64 = 600;
 
-/// Every command handler in `text`, with its position and the fields the trust
-/// hash is made of. Line-based like `codex_command`, and with the same limits:
-/// a hook given as an inline array is not seen.
 /// The hook events Codex 0.155.1 knows. A table for any other event is
 /// accepted by its parser and then ignored: it never runs and never gets a
 /// trust entry, so it must not count for or against trust either.
@@ -416,13 +438,16 @@ const CODEX_EVENTS: [&str; 12] = [
     "Interrupt",
 ];
 
+/// Every command handler in `text` for an event Codex knows, with its position
+/// and the fields the trust hash is made of.
+///
+/// Line-based, so that installing hooks needs no TOML parser and no
+/// dependency: a `[`-table header opens a section, and the `key = value` lines
+/// until the next header belong to it. That reads what `nd7 init` writes and
+/// what the documented configuration looks like; a hook given as an inline
+/// array (`hooks.PreToolUse = [{…}]`, the shape `-c` takes) is not seen, and
+/// would make `nd7 init` append a second one.
 fn codex_hook_tables(text: &str) -> Vec<CodexHook> {
-    let mut tables = codex_hook_tables_all(text);
-    tables.retain(|hook| CODEX_EVENTS.contains(&hook.event.as_str()));
-    tables
-}
-
-fn codex_hook_tables_all(text: &str) -> Vec<CodexHook> {
     let mut tables = Vec::new();
     // How many groups of each event the file has had so far, and the group the
     // handler tables that follow belong to: its event, index and matcher.
@@ -459,6 +484,7 @@ fn codex_hook_tables_all(text: &str) -> Vec<CodexHook> {
             && is_command
             && let Some(command) = command.take()
             && let Some((event, index, matcher)) = &group
+            && CODEX_EVENTS.contains(&event.as_str())
         {
             tables.push(CodexHook {
                 event: event.clone(),
@@ -586,17 +612,6 @@ fn read_json(path: &Path) -> io::Result<Value> {
     serde_json::from_str(&text).map_err(|e| io::Error::other(format!("{}: {e}", path.display())))
 }
 
-/// A settings file as its top-level object; a missing or empty file is `{}`.
-fn read_object(path: &Path) -> io::Result<Map<String, Value>> {
-    match read_json(path)? {
-        Value::Object(map) => Ok(map),
-        other => Err(io::Error::other(format!(
-            "{}: expected a JSON object, got {other}",
-            path.display()
-        ))),
-    }
-}
-
 /// The array of hook entries registered for `event`, created if absent.
 fn entries_of<'a>(
     hooks: &'a mut Map<String, Value>,
@@ -638,33 +653,6 @@ fn has_record_hook(entry: &Value) -> bool {
 fn has_prefix_hook(entry: &Value) -> bool {
     hooks_of(entry)
         .any(|hook| command_of(hook).is_some_and(|command| command.ends_with(PREFIX_TAIL)))
-}
-
-/// Does a `[[hooks.<event>]]` or `[[hooks.<event>.hooks]]` table in `text`
-/// hold a `command` the predicate accepts?
-///
-/// Line-based, so that installing hooks needs no TOML parser and no
-/// dependency: a `[`-table header opens a section, and every `command = "…"`
-/// line until the next header belongs to it. That reads what `nd7 init` writes
-/// and what the documented configuration looks like; a hook given as an inline
-/// array (`hooks.PreToolUse = [{…}]`, the shape `-c` takes) is not seen, and
-/// would make `nd7 init` append a second one.
-fn codex_command(text: &str, event: &str, accept: impl Fn(&str) -> bool) -> bool {
-    let (table, hooks) = (format!("hooks.{event}"), format!("hooks.{event}.hooks"));
-    let mut inside = false;
-    for line in text.lines() {
-        let line = line.trim();
-        if let Some(header) = line.strip_prefix('[') {
-            let header = header.trim_matches(['[', ']']).trim();
-            inside = header == table || header == hooks;
-        } else if inside
-            && let Some(command) = toml_value(line, "command").and_then(toml_unquote)
-            && accept(command)
-        {
-            return true;
-        }
-    }
-    false
 }
 
 /// The right-hand side of a `<key> = <value>` line, if that is what this line
@@ -880,8 +868,6 @@ mod tests {
         );
     }
 
-    /// The hashes Codex 0.155.1 wrote for nd7's own seven hooks, which is the
-    /// whole of what makes the approval `nd7 init` writes an approval.
     #[test]
     fn codex_tables_for_events_codex_does_not_know_are_ignored() {
         let text = "[[hooks.PostToolUseFailure]]\n\n[[hooks.PostToolUseFailure.hooks]]\ntype = \"command\"\ncommand = \"/opt/nd7 record\"\ntimeout = 5\n\n[[hooks.Stop]]\n\n[[hooks.Stop.hooks]]\ntype = \"command\"\ncommand = \"/opt/nd7 record\"\ntimeout = 5\n";
@@ -890,12 +876,16 @@ mod tests {
         assert_eq!(events, ["Stop"]);
     }
 
+    /// The hashes Codex 0.155.1 wrote for nd7's own seven hooks, which is the
+    /// whole of what makes the approval `nd7 init` writes an approval.
     #[test]
     fn codex_trust_hashes_match_what_codex_wrote() {
         // The recipe hashes the compact JSON with its keys sorted, which is
         // what `json!` prints only because serde_json's map is a `BTreeMap`.
         assert_eq!(json!({ "b": 1, "a": 0 }).to_string(), r#"{"a":0,"b":1}"#);
 
+        // The vectors below were captured with Codex running this exact path,
+        // and the path is part of what is hashed: do not change it.
         const BIN: &str = "/Users/ahmedabouzied/code/work/nd7/nd7-core/target/debug/nd7";
         let record = format!("{BIN} record");
         assert_eq!(
