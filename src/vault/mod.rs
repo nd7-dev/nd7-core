@@ -6,13 +6,20 @@
 //! on this module so that neither can drift: the same signing bytes, the same
 //! associated data, the same index fields, the same linkage rule.
 //!
-//! The rule that keeps that possible: **nothing in this module does I/O.**
-//! No sockets, no files, no environment, no clock, no logging. Types and pure
-//! functions only. The machine's `nd7 ship` supplies the network and the
-//! session directory; the vault supplies the network and its database; this
-//! module supplies what they have to agree on. A dependency here on anything
-//! that touches the world would make the server depend on the recorder's
-//! idea of where state lives, which is the one thing it must not do.
+//! The rule that keeps that possible: **nothing here opens a file, a socket,
+//! the environment or the clock.** The machine's `nd7 ship` supplies the
+//! network and the session directory; the vault supplies the network and its
+//! database; this module supplies what they have to agree on. A dependency
+//! here on where state lives would make the server depend on the recorder's
+//! idea of it, which is the one thing it must not do.
+//!
+//! Two things it does reach for. It reads the operating system's random
+//! source, because a key and a nonce have to come from somewhere:
+//! [`MachineKey::generate`], [`ChainKey::generate`], [`ChainKey::wrap_for`]
+//! and [`seal_batch`]. And it shares [`crate::session_log::Head`] and
+//! [`crate::session_log::ChainError`] with the recorder, so that the head the
+//! vault reports and the head in the session directory are one type rather
+//! than two that can drift apart.
 //!
 //! - [`crypto`]: machine, admin and chain keys, request signatures,
 //!   recipient sets, and the compress-then-encrypt batch format.

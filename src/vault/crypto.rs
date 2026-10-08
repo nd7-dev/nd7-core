@@ -125,9 +125,30 @@ impl MachineKey {
         timestamp_secs: i64,
         body_hash_hex: &str,
     ) -> String {
-        let msg = request_bytes(method, path, machine_id, timestamp_secs, body_hash_hex);
-        B64.encode(self.0.sign(msg.as_bytes()).to_bytes())
+        sign_request_with(
+            &self.0,
+            method,
+            path,
+            machine_id,
+            timestamp_secs,
+            body_hash_hex,
+        )
     }
+}
+
+/// One Ed25519 key over the request bytes, base64: the body of both
+/// `sign_request` methods, which differ only in whose key signs and in what
+/// the third field names.
+fn sign_request_with(
+    key: &SigningKey,
+    method: &str,
+    path: &str,
+    signer: &str,
+    timestamp_secs: i64,
+    body_hash_hex: &str,
+) -> String {
+    let msg = request_bytes(method, path, signer, timestamp_secs, body_hash_hex);
+    B64.encode(key.sign(msg.as_bytes()).to_bytes())
 }
 
 /// The exact bytes a request signature covers; the layout is documented on
@@ -158,14 +179,22 @@ pub fn verify_request(
     body_hash_hex: &str,
     signature_b64: &str,
 ) -> bool {
+    let msg = request_bytes(method, path, machine_id, timestamp_secs, body_hash_hex);
+    verify_ed25519(public_key, &msg, signature_b64)
+}
+
+/// Check one Ed25519 signature, given as base64 of 64 bytes, over `message`.
+/// `false` for anything wrong at all: a public key that is not a point, a
+/// signature that is not base64 or not 64 bytes, or a signature over other
+/// bytes.
+fn verify_ed25519(public_key: &[u8; 32], message: &str, signature_b64: &str) -> bool {
     let Ok(key) = VerifyingKey::from_bytes(public_key) else {
         return false;
     };
     let Ok(raw) = decode_array::<64>(signature_b64) else {
         return false;
     };
-    let msg = request_bytes(method, path, machine_id, timestamp_secs, body_hash_hex);
-    key.verify(msg.as_bytes(), &Signature::from_bytes(&raw))
+    key.verify(message.as_bytes(), &Signature::from_bytes(&raw))
         .is_ok()
 }
 
@@ -190,7 +219,10 @@ pub struct AdminKey {
 
 impl AdminKey {
     /// A new key pair from a fresh seed out of the operating system's CSPRNG.
-    pub fn generate() -> AdminKey {
+    /// An admin's own key is made by their CLI, from a seed they keep, so
+    /// this is only ever a test's.
+    #[cfg(test)]
+    fn generate() -> AdminKey {
         let mut seed = [0u8; 32];
         OsRng.fill_bytes(&mut seed);
         AdminKey::from_seed(&seed)
@@ -234,14 +266,14 @@ impl AdminKey {
         timestamp_secs: i64,
         body_hash_hex: &str,
     ) -> String {
-        let msg = request_bytes(
+        sign_request_with(
+            &self.ed25519,
             method,
             path,
             admin_fingerprint,
             timestamp_secs,
             body_hash_hex,
-        );
-        B64.encode(self.ed25519.sign(msg.as_bytes()).to_bytes())
+        )
     }
 
     /// Open a chain key wrapped by [`ChainKey::wrap_for`] to this admin.
@@ -271,7 +303,7 @@ pub struct AdminPublic {
 
 impl AdminPublic {
     /// The canonical 64 bytes: the X25519 public key then the Ed25519 one.
-    pub fn canonical_bytes(&self) -> [u8; 64] {
+    fn canonical_bytes(&self) -> [u8; 64] {
         let mut out = [0u8; 64];
         out[..32].copy_from_slice(&self.x25519);
         out[32..].copy_from_slice(&self.ed25519);
@@ -398,17 +430,11 @@ impl SignedRecipientSet {
         else {
             return false;
         };
-        let Ok(key) = VerifyingKey::from_bytes(&signer.ed25519) else {
-            return false;
-        };
-        let Ok(raw) = decode_array::<64>(&self.signature) else {
-            return false;
-        };
-        key.verify(
-            recipients_bytes(&self.set).as_bytes(),
-            &Signature::from_bytes(&raw),
+        verify_ed25519(
+            &signer.ed25519,
+            &recipients_bytes(&self.set),
+            &self.signature,
         )
-        .is_ok()
     }
 }
 
