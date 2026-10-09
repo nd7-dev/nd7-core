@@ -44,6 +44,15 @@ impl Agent {
             Agent::Codex => "codex",
         }
     }
+
+    /// The configuration file nd7 writes its hooks into, under `root`: a home
+    /// directory, or a project directory.
+    pub fn config_path(self, root: &Path) -> PathBuf {
+        match self {
+            Agent::Claude => root.join(".claude/settings.json"),
+            Agent::Codex => root.join(".codex/config.toml"),
+        }
+    }
 }
 
 impl fmt::Display for Agent {
@@ -93,6 +102,24 @@ const PREFIX_TAIL: &str = " hook-prefix";
 /// command is one string rather than a command and arguments.
 const RECORD_TAIL: &str = "nd7 record";
 
+/// Seconds Codex gives the `PreToolUse` hook. It is part of the trust hash,
+/// so the installed table and the hook `nd7 run` passes must agree on it.
+pub const CODEX_PREFIX_TIMEOUT: u64 = 30;
+
+/// The command both agents run as their `PreToolUse` hook.
+pub fn prefix_hook_command(nd7: &Path) -> String {
+    format!("{}{PREFIX_TAIL}", nd7.display())
+}
+
+/// The Claude Code hook entry that runs it: the same JSON whether `nd7 init`
+/// writes it into a settings file or `nd7 run` passes it in `--settings`.
+pub fn claude_prefix_hook(nd7: &Path) -> Value {
+    json!({
+        "matcher": "Bash",
+        "hooks": [ { "type": "command", "command": prefix_hook_command(nd7) } ]
+    })
+}
+
 /// Puts nd7's hooks in a Claude Code settings file: the `PreToolUse` hook that
 /// routes Bash through `nd7-exec`, and a `record` hook per recorded event. A
 /// missing file is created, everything already in it is kept, and a hook nd7
@@ -139,19 +166,17 @@ pub fn install_claude(settings: &Path, nd7: &Path) -> io::Result<Changed> {
     // before the rewrite is decided.
     let pre_tool_use = entries_of(hooks, "PreToolUse")?;
     if !pre_tool_use.iter().any(has_prefix_hook) {
-        pre_tool_use.push(json!({
-            "matcher": "Bash",
-            "hooks": [ { "type": "command", "command": format!("{}{PREFIX_TAIL}", nd7.display()) } ]
-        }));
+        pre_tool_use.push(claude_prefix_hook(nd7));
         changed = true;
     }
 
     if !changed {
         return Ok(Changed::AlreadyInstalled);
     }
-    write_atomic(
+    crate::session::write_atomic(
         settings,
-        &format!("{}\n", serde_json::to_string_pretty(&root)?),
+        format!("{}\n", serde_json::to_string_pretty(&root)?).as_bytes(),
+        0o666,
     )?;
     Ok(Changed::Installed)
 }
@@ -162,7 +187,7 @@ pub fn install_claude(settings: &Path, nd7: &Path) -> io::Result<Changed> {
 /// another checkout does not collect a second hook — but a hook naming another
 /// binary is not this one's, so `nd7 run` still passes its own.
 pub fn claude_has_hook(settings: &Path, nd7: &Path) -> bool {
-    let want = format!("{}{PREFIX_TAIL}", nd7.display());
+    let want = prefix_hook_command(nd7);
     let Ok(Value::Object(root)) = read_json(settings) else {
         return false;
     };
@@ -182,6 +207,7 @@ pub fn claude_has_hook(settings: &Path, nd7: &Path) -> bool {
 /// the one edit that cannot disturb what is already in it.
 pub fn install_codex(config: &Path, nd7: &Path) -> io::Result<Changed> {
     let text = read_or_empty(config)?;
+    let prefix = toml_string(&prefix_hook_command(nd7));
     let nd7 = nd7.display();
     let there = codex_hook_tables(&text);
     let installed_for = |event: &str, tail: &str| {
@@ -199,9 +225,8 @@ pub fn install_codex(config: &Path, nd7: &Path) -> io::Result<Changed> {
              \n\
              [[hooks.PreToolUse.hooks]]\n\
              type = \"command\"\n\
-             command = {command}\n\
-             timeout = 30\n",
-            command = toml_string(&format!("{nd7}{PREFIX_TAIL}")),
+             command = {prefix}\n\
+             timeout = {CODEX_PREFIX_TIMEOUT}\n",
         ));
     }
 
@@ -294,7 +319,7 @@ fn codex_trust_entries(config: &Path, ours: &str, text: &str) -> String {
 /// Whether `config` already runs *this* nd7 as its `PreToolUse` hook. As for
 /// Claude Code, the path must match, since that is the binary the hook runs.
 pub fn codex_has_hook(config: &Path, nd7: &Path) -> bool {
-    let want = format!("{}{PREFIX_TAIL}", nd7.display());
+    let want = prefix_hook_command(nd7);
     let Ok(text) = fs::read_to_string(config) else {
         return false;
     };
@@ -666,19 +691,6 @@ fn toml_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
 fn toml_unquote(value: &str) -> Option<&str> {
     let value = value.strip_prefix('"')?;
     value.get(..value.find('"')?)
-}
-
-/// Writes `contents` through a temporary file in the same directory, so a
-/// settings file is never left half-written.
-fn write_atomic(path: &Path, contents: &str) -> io::Result<()> {
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir)?;
-    }
-    let mut name = path.as_os_str().to_owned();
-    name.push(".nd7-tmp");
-    let tmp = PathBuf::from(name);
-    fs::write(&tmp, contents)?;
-    fs::rename(&tmp, path)
 }
 
 #[cfg(test)]

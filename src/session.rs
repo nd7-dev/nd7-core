@@ -11,7 +11,9 @@
 //! directories whose process is gone.
 
 use std::{
-    fs, io,
+    fs,
+    io::{self, Write},
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
 };
 
@@ -86,8 +88,12 @@ impl Drop for Session {
 /// this is a free function rather than a method on [`Session`].
 pub fn write_policy_at(dir: &Path, policy: &Policy) -> io::Result<()> {
     let record = serde_json::to_string_pretty(policy).map_err(io::Error::other)?;
-    write_atomic(&dir.join("record.json"), &record)?;
-    write_atomic(&dir.join("policy.sb"), &policy.render_policy())
+    write_atomic(&dir.join("record.json"), record.as_bytes(), 0o666)?;
+    write_atomic(
+        &dir.join("policy.sb"),
+        policy.render_policy().as_bytes(),
+        0o666,
+    )
 }
 
 /// The policy recorded for the session of `pid`.
@@ -120,12 +126,25 @@ pub fn sessions_root() -> io::Result<PathBuf> {
     Ok(home()?.join(".nd7/sessions"))
 }
 
-fn write_atomic(path: &Path, contents: &str) -> io::Result<()> {
+/// Writes `bytes` through a temporary file beside `path` and a rename, so a
+/// reader never sees half a file. The temporary is created with `mode`, the
+/// umask applies to it as usual, and a file that must stay private is private
+/// from its first byte. The parent directory is created if it is missing.
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
     let mut name = path.as_os_str().to_owned();
     name.push(".tmp");
     let tmp = PathBuf::from(name);
 
-    fs::write(&tmp, contents)?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(mode)
+        .open(&tmp)?;
+    file.write_all(bytes)?;
     fs::rename(&tmp, path)
 }
 

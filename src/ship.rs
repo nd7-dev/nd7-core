@@ -22,9 +22,7 @@
 
 use std::{
     collections::BTreeMap,
-    fs,
-    io::{self, Write},
-    os::unix::fs::OpenOptionsExt,
+    fs, io,
     path::{Path, PathBuf},
     thread,
     time::Duration,
@@ -678,21 +676,11 @@ fn vault_dir() -> Result<PathBuf> {
     Ok(state_root()?.join("vault"))
 }
 
-/// Write a file nobody else can read, atomically: a private temporary beside
-/// it, then a rename. Every file this module owns goes through here, so a
-/// half-written key or a half-written `shipped` cannot be read back.
+/// Write a file nobody else can read, atomically. Every file this module owns
+/// goes through here, so a half-written key or a half-written `shipped` cannot
+/// be read back.
 fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut name = path.as_os_str().to_owned();
-    name.push(".tmp");
-    let tmp = PathBuf::from(name);
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&tmp)?;
-    file.write_all(bytes)?;
-    fs::rename(&tmp, path)
+    crate::session::write_atomic(path, bytes, 0o600)
 }
 
 /// A string-valued envelope member, read straight out of a frame's bytes.

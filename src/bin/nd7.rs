@@ -413,7 +413,7 @@ fn hooks_note(agent: Option<Agent>, home: &Path, nd7: &Path) -> &'static str {
     match agent {
         Some(Agent::Codex)
             if installed(Agent::Codex, home, nd7)
-                && !agent_config::codex_hooks_trusted(&home.join(".codex/config.toml"), nd7) =>
+                && !agent_config::codex_hooks_trusted(&Agent::Codex.config_path(home), nd7) =>
         {
             " (hooks: installed, not yet trusted; run `nd7 init codex` to record Codex's approval)"
         }
@@ -454,9 +454,10 @@ fn agent_of(program: &str) -> Option<Agent> {
 /// `PreToolUse` hook, in which case the flags leave the hook out.
 #[cfg(target_os = "macos")]
 fn installed(agent: Agent, home: &Path, nd7: &Path) -> bool {
+    let config = agent.config_path(home);
     match agent {
-        Agent::Claude => agent_config::claude_has_hook(&home.join(".claude/settings.json"), nd7),
-        Agent::Codex => agent_config::codex_has_hook(&home.join(".codex/config.toml"), nd7),
+        Agent::Claude => agent_config::claude_has_hook(&config, nd7),
+        Agent::Codex => agent_config::codex_has_hook(&config, nd7),
     }
 }
 
@@ -470,9 +471,8 @@ fn installed(agent: Agent, home: &Path, nd7: &Path) -> bool {
 fn claude_flags(home: &Path, nd7: &Path) -> Vec<String> {
     let mut settings = serde_json::json!({ "sandbox": { "enabled": false } });
     if !installed(Agent::Claude, home, nd7) {
-        let hook = format!("{} hook-prefix", nd7.display());
         settings["hooks"] = serde_json::json!({
-            "PreToolUse": [ { "matcher": "Bash", "hooks": [ { "type": "command", "command": hook } ] } ]
+            "PreToolUse": [ agent_config::claude_prefix_hook(nd7) ]
         });
     }
     vec![
@@ -499,13 +499,14 @@ fn claude_flags(home: &Path, nd7: &Path) -> Vec<String> {
 #[cfg(target_os = "macos")]
 fn codex_flags(home: &Path, nd7: &Path) -> Vec<String> {
     let mut flags = vec!["-s".to_owned(), "danger-full-access".to_owned()];
-    let config = home.join(".codex/config.toml");
+    let config = Agent::Codex.config_path(home);
     if !installed(Agent::Codex, home, nd7) {
-        let hook = agent_config::toml_string(&format!("{} hook-prefix", nd7.display()));
+        let hook = agent_config::toml_string(&agent_config::prefix_hook_command(nd7));
+        let timeout = agent_config::CODEX_PREFIX_TIMEOUT;
         flags.push("--dangerously-bypass-hook-trust".to_owned());
         flags.push("-c".to_owned());
         flags.push(format!(
-            r#"hooks.PreToolUse=[{{matcher="", hooks=[{{type="command", command={hook}, timeout=30}}]}}]"#
+            r#"hooks.PreToolUse=[{{matcher="", hooks=[{{type="command", command={hook}, timeout={timeout}}}]}}]"#
         ));
     } else if !agent_config::codex_hooks_trusted(&config, nd7) {
         // Installed, but the approval `nd7 init` writes is not there any more.
@@ -659,7 +660,7 @@ fn init_agents(args: impl Iterator<Item = String>) -> Result<()> {
     for &agent in &agents {
         let (path, changed) = match agent {
             Agent::Claude => {
-                let path = root.join(".claude/settings.json");
+                let path = Agent::Claude.config_path(&root);
                 let changed = agent_config::install_claude(&path, &nd7)?;
                 (path, changed)
             }
@@ -671,7 +672,7 @@ fn init_agents(args: impl Iterator<Item = String>) -> Result<()> {
                 continue;
             }
             Agent::Codex => {
-                let path = root.join(".codex/config.toml");
+                let path = Agent::Codex.config_path(&root);
                 let changed = agent_config::install_codex(&path, &nd7)?;
                 (path, changed)
             }
